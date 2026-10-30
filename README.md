@@ -100,6 +100,20 @@ Access settings by right-clicking the tray icon → Settings, or double-click th
 - **Start Minimized**: Launch to system tray
 - **Start with Windows**: Add to Windows startup
 
+## Speech-to-Text Backends
+
+Each clip is sent to the backends below in order (Settings → Speech) until one returns text:
+
+1. **ChatGPT**: uses your Codex app's ChatGPT sign-in (`~/.codex/auth.json`, or `$CODEX_HOME/auth.json`). Sign in to Codex on this PC to use it. Audio goes up as Ogg/Opus.
+2. **Your server**: the OpenAI-compatible endpoint under "Your server" (default `https://stt.etdofresh.com`, with your API key).
+3. **Windows speech**: Windows' built-in offline recognizer. Least accurate; Windows only.
+
+A backend that isn't usable (not signed in, server unreachable, not Windows) is skipped. Any error or timeout falls through to the next one, and a backend that just failed is tried last for the next two minutes. The bar shows which backend typed the text. If every backend fails, the clip is kept: hover the message to see why each one failed, then **Retry**, **Save audio** (writes a WAV next to `config.json` under `Recordings`), or **Discard**.
+
+Push-to-talk taps shorter than 0.3 s are discarded (`PushToTalkMinHoldSeconds`).
+
+For tests, set `WHISPER_KEYBOARD_TRANSCRIBE_FIXTURE=some text` and every clip "transcribes" to that text without calling any backend. Unit tests: `dotnet test`.
+
 ## Exit Words
 
 Exit words let you end input and press Enter by voice. When enabled:

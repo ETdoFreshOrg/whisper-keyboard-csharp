@@ -8,6 +8,7 @@ using Avalonia.Media;
 using Avalonia.Threading;
 using Microsoft.Win32;
 using WhisperKeyboard.Core;
+using WhisperKeyboard.Core.Transcription;
 
 namespace WhisperKeyboard;
 
@@ -19,6 +20,11 @@ public partial class SettingsWindow : Window
     private readonly int _initialTab;
     private TextBox? _activeHotkeyBox;
     private double _currentVolume;
+
+    // Speech-to-text backend list being edited (saved on OK).
+    private readonly List<string> _backendOrder = new();
+    private readonly Dictionary<string, bool> _backendEnabled = new();
+    private readonly Dictionary<string, TextBlock> _backendTestStatus = new();
 
     public event EventHandler? SettingsSaved;
 
@@ -201,6 +207,13 @@ public partial class SettingsWindow : Window
         // Model
         ModelBox.Text = _config.Model;
 
+        // Speech-to-text backends
+        _backendOrder.Clear();
+        _backendOrder.AddRange(_config.Transcription.NormalizedOrder());
+        foreach (var id in TranscriptionSettings.AllBackendIds)
+            _backendEnabled[id] = _config.Transcription.For(id).Enabled;
+        RenderBackendList();
+
         // Language
         for (int i = 0; i < LanguageBox.Items.Count; i++)
         {
@@ -342,6 +355,11 @@ public partial class SettingsWindow : Window
         // Model
         _config.Model = string.IsNullOrWhiteSpace(ModelBox.Text) ? "whisper-1" : ModelBox.Text.Trim();
 
+        // Speech-to-text backends
+        _config.Transcription.Order = new List<string>(_backendOrder);
+        foreach (var (id, enabled) in _backendEnabled)
+            _config.Transcription.For(id).Enabled = enabled;
+
         // Language
         if (LanguageBox.SelectedItem is ComboBoxItem langItem)
         {
@@ -470,6 +488,119 @@ public partial class SettingsWindow : Window
         finally
         {
             TestEndpointButton.IsEnabled = true;
+        }
+    }
+
+    private static string BackendLabel(string id) => id switch
+    {
+        TranscriptionSettings.ChatGpt => "ChatGPT (Codex sign-in)",
+        TranscriptionSettings.Lan => "Your server (below)",
+        TranscriptionSettings.System => "Windows speech (offline)",
+        _ => id
+    };
+
+    /// <summary>One row per backend: enable checkbox, move up/down, Test, and a status line.</summary>
+    private void RenderBackendList()
+    {
+        BackendListPanel.Children.Clear();
+        _backendTestStatus.Clear();
+
+        for (int i = 0; i < _backendOrder.Count; i++)
+        {
+            var id = _backendOrder[i];
+            var index = i;
+
+            var check = new CheckBox
+            {
+                Content = $"{i + 1}. {BackendLabel(id)}",
+                IsChecked = _backendEnabled.GetValueOrDefault(id, true),
+                VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center
+            };
+            check.IsCheckedChanged += (s, e) => _backendEnabled[id] = check.IsChecked == true;
+
+            var up = new Button { Content = "▲", Padding = new Thickness(8, 2), IsEnabled = index > 0 };
+            up.Click += (s, e) => MoveBackend(index, -1);
+            ToolTip.SetTip(up, "Try earlier");
+
+            var down = new Button { Content = "▼", Padding = new Thickness(8, 2), IsEnabled = index < _backendOrder.Count - 1 };
+            down.Click += (s, e) => MoveBackend(index, +1);
+            ToolTip.SetTip(down, "Try later");
+
+            var test = new Button { Content = "Test", Padding = new Thickness(10, 2) };
+            var status = new TextBlock { FontSize = 11, Foreground = new SolidColorBrush(Color.Parse("#888888")), TextWrapping = TextWrapping.Wrap, IsVisible = false };
+            test.Click += async (s, e) => await TestBackendAsync(id, test, status);
+            _backendTestStatus[id] = status;
+
+            var row = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,4,Auto,4,Auto") };
+            Grid.SetColumn(check, 0);
+            Grid.SetColumn(up, 1);
+            Grid.SetColumn(down, 3);
+            Grid.SetColumn(test, 5);
+            row.Children.Add(check);
+            row.Children.Add(up);
+            row.Children.Add(down);
+            row.Children.Add(test);
+
+            var block = new StackPanel { Spacing = 2 };
+            block.Children.Add(row);
+            block.Children.Add(status);
+            BackendListPanel.Children.Add(block);
+        }
+    }
+
+    private void MoveBackend(int index, int delta)
+    {
+        var target = index + delta;
+        if (target < 0 || target >= _backendOrder.Count) return;
+        (_backendOrder[index], _backendOrder[target]) = (_backendOrder[target], _backendOrder[index]);
+        RenderBackendList();
+    }
+
+    /// <summary>Build a backend from the current (unsaved) UI values and send it a short silent clip.</summary>
+    private async Task TestBackendAsync(string id, Button button, TextBlock status)
+    {
+        var language = LanguageBox.SelectedItem is ComboBoxItem langItem ? langItem.Tag?.ToString() ?? "en" : _config.Language;
+        SpeechTranscriber? server = null;
+        ChatGptTranscriber? chatGpt = null;
+        ITranscriber backend;
+        switch (id)
+        {
+            case TranscriptionSettings.ChatGpt:
+                chatGpt = new ChatGptTranscriber(() => ChatGptTranscriber.ResolveAuthPath(_config.Transcription.ChatGptBackend.CodexAuthPath));
+                backend = chatGpt;
+                break;
+            case TranscriptionSettings.Lan:
+                server = new SpeechTranscriber(new Config
+                {
+                    ApiBaseUrl = ResolveBaseUrlFromUi(),
+                    ApiKey = !string.IsNullOrWhiteSpace(ApiKeyBox.Text)
+                        ? ApiKeyBox.Text.Trim()
+                        : (Environment.GetEnvironmentVariable("OPENAI_API_KEY") ?? _config.ApiKey),
+                    Model = string.IsNullOrWhiteSpace(ModelBox.Text) ? "whisper-1" : ModelBox.Text.Trim(),
+                    Language = language
+                });
+                backend = new LanTranscriber(server);
+                break;
+            default:
+                backend = new SystemSpeechTranscriber();
+                break;
+        }
+
+        button.IsEnabled = false;
+        status.IsVisible = true;
+        status.Foreground = new SolidColorBrush(Color.Parse("#888888"));
+        status.Text = "Testing…";
+        try
+        {
+            var (ok, message) = await TranscriptionChain.TestBackendAsync(backend, language, TimeSpan.FromSeconds(30));
+            status.Foreground = new SolidColorBrush(ok ? Color.Parse("#3CB371") : Color.Parse("#E05050"));
+            status.Text = message;
+        }
+        finally
+        {
+            button.IsEnabled = true;
+            server?.Dispose();
+            chatGpt?.Dispose();
         }
     }
 

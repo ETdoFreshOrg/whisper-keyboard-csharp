@@ -66,10 +66,19 @@
                 </ScrollViewer>
             </TabItem>
 
-            <!-- OpenAI Tab -->
-            <TabItem Header="OpenAI">
+            <!-- Speech-to-text Tab -->
+            <TabItem Header="Speech">
                 <ScrollViewer Margin="10">
                     <StackPanel Spacing="15">
+                        <StackPanel Spacing="5">
+                            <TextBlock Text="Speech-to-text backends (tried top to bottom)" FontSize="12" Foreground="#888888"/>
+                            <StackPanel x:Name="BackendListPanel" Spacing="6"/>
+                            <TextBlock Text="ChatGPT uses your Codex sign-in. If one fails, the next is tried and the clip is kept until one works."
+                                       FontSize="10" Foreground="#666666" TextWrapping="Wrap"/>
+                        </StackPanel>
+
+                        <TextBlock Text="Your server" FontSize="13" FontWeight="SemiBold"/>
+
                         <StackPanel Spacing="5">
                             <TextBlock Text="API Provider" FontSize="12" Foreground="#888888"/>
                             <ComboBox x:Name="ApiProviderBox" SelectedIndex="0">

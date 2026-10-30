@@ -1,4 +1,5 @@
 using System.Text.Json;
+using WhisperKeyboard.Core.Transcription;
 
 namespace WhisperKeyboard.Core;
 
@@ -44,6 +45,10 @@ public class Config
     public string Model { get; set; } = "whisper-1";
     public string Language { get; set; } = "en";
 
+    // Speech-to-text backends, tried in order until one returns text:
+    // ChatGPT (via the Codex sign-in), then the server above, then Windows speech.
+    public TranscriptionSettings Transcription { get; set; } = new();
+
     // Typing Settings
     public double TypingSpeed { get; set; } = 0.001;
     public int TypingDelayMs { get; set; } = 0; // Delay between characters in typing mode (0 = no delay, batch send)
@@ -78,6 +83,8 @@ public class Config
     // macOS: any combination of Left/Right Control/Shift/Option/Command and Fn.
     // Windows: Left/Right Control/Shift/Alt/Win (Fn unsupported).
     public string PushToTalkKeys { get; set; } = "RightOption+RightShift";
+    // Releasing the keys sooner than this discards the clip (an accidental tap).
+    public double PushToTalkMinHoldSeconds { get; set; } = 0.3;
 
     // General Settings
     public bool ShowNotifications { get; set; } = true;

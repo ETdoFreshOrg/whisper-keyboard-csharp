@@ -5,6 +5,7 @@ using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using WhisperKeyboard.Core;
+using WhisperKeyboard.Core.Transcription;
 
 namespace WhisperKeyboard;
 
@@ -17,6 +18,8 @@ public class WhisperKeyboardApp : IDisposable
     private readonly Config _config;
     private readonly IAudioCapture _audioCapture;
     private readonly SpeechTranscriber _transcriber;
+    private readonly ChatGptTranscriber _chatGptTranscriber;
+    private readonly TranscriptionChain _transcriptionChain;
     private readonly ClipboardTextTyper _textTyper;
     private readonly TranscriptionHistory _history;
     private readonly RecordingIndicator _recordingIndicator;
@@ -44,6 +47,8 @@ public class WhisperKeyboardApp : IDisposable
     private byte[]? _lastFailedAudio;
     private bool _lastFailedWasLong;
     private bool _lastFailedWasPtt;
+    private DateTime _pushToTalkStartedAt;
+    private bool _discardNextAudio; // set while a too-short push-to-talk tap is being thrown away
 
     // Tray icon (defined in App.axaml)
     private NativeMenuItem? _statusMenuItem;
@@ -55,6 +60,12 @@ public class WhisperKeyboardApp : IDisposable
         _config = Config.Load();
         _history = new TranscriptionHistory();
         _transcriber = new SpeechTranscriber(_config);
+        _chatGptTranscriber = new ChatGptTranscriber(
+            () => ChatGptTranscriber.ResolveAuthPath(_config.Transcription.ChatGptBackend.CodexAuthPath));
+        _transcriptionChain = new TranscriptionChain(
+            () => _config.Transcription,
+            () => _config.Language,
+            new ITranscriber[] { _chatGptTranscriber, new LanTranscriber(_transcriber), new SystemSpeechTranscriber() });
         
         if (OperatingSystem.IsWindows())
         {
@@ -97,6 +108,7 @@ public class WhisperKeyboardApp : IDisposable
         _recordingIndicator.OnRetryClicked += RetryFailedTranscription;
         _recordingIndicator.OnDiscardClicked += DiscardFailedTranscription;
         _recordingIndicator.OnCancelClicked += CancelTranscription;
+        _recordingIndicator.OnSaveAudioClicked += SaveFailedAudio;
 
         // Set long record button visibility based on config
         _recordingIndicator.SetLongRecordButtonVisible(false);
@@ -449,6 +461,11 @@ public class WhisperKeyboardApp : IDisposable
 
     private async void OnAudioReady(object? sender, AudioReadyEventArgs e)
     {
+        if (_discardNextAudio)
+        {
+            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Discarding push-to-talk tap ({e.AudioData.Length} bytes)");
+            return;
+        }
         if (_isTranscribing)
         {
             Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Skipping - already transcribing");
@@ -500,16 +517,17 @@ public class WhisperKeyboardApp : IDisposable
         bool transcriptionFailed = false;
         try
         {
-            // Use appropriate transcription method based on recording type
-            TranscriptionResult? result;
-            if (isFromLongRecording)
+            // Clips this small hold no speech; drop them rather than spend a request.
+            if (audioData.Length < MinClipBytes)
             {
-                result = await _transcriber.TranscribeLongRecordingAsync(audioData, cancellationToken);
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Clip too short ({audioData.Length} bytes) - skipping");
+                return;
             }
-            else
-            {
-                result = await _transcriber.TranscribeAsync(audioData, cancellationToken);
-            }
+
+            // Try each speech-to-text backend in turn (ChatGPT, your server, Windows speech).
+            var recording = new Recording(audioData, _config.SampleRate, _config.Channels);
+            var chainResult = await _transcriptionChain.TranscribeAsync(recording, cancellationToken);
+            TranscriptionResult? result = chainResult.Result;
 
             // Check if we were cancelled or stopped before typing
             // Note: paused is OK - transcription should complete if user spoke before pausing
@@ -521,7 +539,7 @@ public class WhisperKeyboardApp : IDisposable
 
             if (result != null && !string.IsNullOrWhiteSpace(result.Text))
             {
-                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Transcribed: \"{result.Text}\"");
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Transcribed via {result.Backend}: \"{result.Text}\"");
 
                 // "Repeat" keyword: if user says just "repeat", re-type the previous transcription
                 if (IsRepeatKeyword(result.Text))
@@ -564,17 +582,21 @@ public class WhisperKeyboardApp : IDisposable
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Transcription error: {ex.Message}");
+            // Never lose audio: keep the clip until a transcription succeeds or the user discards it.
+            var details = ex is AllBackendsFailedException all ? all.Details : ex.Message;
+            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Transcription error: {ex.Message}{Environment.NewLine}{details}");
             transcriptionFailed = true;
             _lastFailedAudio = audioData;
             _lastFailedWasLong = isFromLongRecording;
             _lastFailedWasPtt = isFromPushToTalk;
 
-            var errMsg = ex.Message;
+            var errMsg = ex is AllBackendsFailedException failed
+                ? FailureSummary(failed)
+                : ex.Message;
             Dispatcher.UIThread.Post(() =>
             {
                 UpdateStatus("Transcription failed");
-                _recordingIndicator.ShowTranscriptionFailed(errMsg);
+                _recordingIndicator.ShowTranscriptionFailed(errMsg, details);
             });
         }
         finally
@@ -623,6 +645,57 @@ public class WhisperKeyboardApp : IDisposable
                     });
                 }
             }
+        }
+    }
+
+    private const int MinClipBytes = 200;
+
+    /// <summary>One line for the bar: the first backend that actually failed, else the first skip reason.</summary>
+    private static string FailureSummary(AllBackendsFailedException ex)
+    {
+        var first = ex.Attempts.FirstOrDefault(a => a.Outcome == AttemptOutcome.Failed) ?? ex.Attempts.FirstOrDefault();
+        if (first == null) return ex.Message;
+        var more = ex.Attempts.Count > 1 ? $" (+{ex.Attempts.Count - 1} more, hover for all)" : "";
+        return first + more;
+    }
+
+    /// <summary>Write the failed clip to a WAV file and show it in the file manager.</summary>
+    private void SaveFailedAudio()
+    {
+        var audio = _lastFailedAudio;
+        if (audio == null) return;
+
+        try
+        {
+            var dir = Path.Combine(Path.GetDirectoryName(Config.GetConfigPath())!, "Recordings");
+            Directory.CreateDirectory(dir);
+            var path = Path.Combine(dir, $"recording-{DateTime.Now:yyyyMMdd-HHmmss}.wav");
+            File.WriteAllBytes(path, new Recording(audio, _config.SampleRate, _config.Channels).Wav);
+            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Saved failed recording to {path}");
+            UpdateStatus($"Saved {Path.GetFileName(path)}");
+            RevealInFileManager(path);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Could not save recording: {ex.Message}");
+            UpdateStatus("Could not save audio");
+        }
+    }
+
+    private static void RevealInFileManager(string path)
+    {
+        try
+        {
+            if (OperatingSystem.IsWindows())
+                System.Diagnostics.Process.Start("explorer.exe", $"/select,\"{path}\"");
+            else if (OperatingSystem.IsMacOS())
+                System.Diagnostics.Process.Start("open", new[] { "-R", path });
+            else
+                System.Diagnostics.Process.Start("xdg-open", Path.GetDirectoryName(path)!);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Could not open file manager: {ex.Message}");
         }
     }
 
@@ -838,8 +911,8 @@ public class WhisperKeyboardApp : IDisposable
 
         Dispatcher.UIThread.Post(() =>
         {
-            UpdateStatus("Typing...");
-            _recordingIndicator.ShowTyping();
+            UpdateStatus(string.IsNullOrEmpty(result.Backend) ? "Typing..." : $"Typing ({result.Backend})...");
+            _recordingIndicator.ShowTyping(result.Backend);
         });
 
         await _textTyper.TypeTextAsync(result.Text);
@@ -1008,6 +1081,7 @@ public class WhisperKeyboardApp : IDisposable
             return;
 
         _isPushToTalking = true;
+        _pushToTalkStartedAt = DateTime.Now;
         _audioCapture.StartLongRecording(); // Reuse long recording buffer (captures all audio, bypasses VAD)
 
         Dispatcher.UIThread.Post(() =>
@@ -1045,6 +1119,19 @@ public class WhisperKeyboardApp : IDisposable
         if (!_isPushToTalking) return;
 
         _isPushToTalking = false;
+
+        // A tap shorter than the minimum hold is an accident: throw the clip away.
+        var held = DateTime.Now - _pushToTalkStartedAt;
+        if (held.TotalSeconds < _config.PushToTalkMinHoldSeconds && _audioCapture.IsLongRecording)
+        {
+            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Push-to-Talk held {held.TotalMilliseconds:F0} ms - discarding");
+            _pttPostRollCts?.Cancel();
+            _discardNextAudio = true;
+            try { _audioCapture.StopLongRecording(); }
+            finally { _discardNextAudio = false; }
+            Dispatcher.UIThread.Post(StopListening);
+            return;
+        }
 
         var postRoll = TimeSpan.FromSeconds(Math.Max(0, _config.PostRollSeconds));
         if (postRoll <= TimeSpan.Zero)
@@ -1167,6 +1254,7 @@ public class WhisperKeyboardApp : IDisposable
 
         try { _pushToTalkHook?.Dispose(); } catch (Exception ex) { Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Error disposing PTT hook: {ex.Message}"); }
         try { _globalHotkey.Dispose(); } catch (Exception ex) { Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Error disposing hotkey: {ex.Message}"); }
+        try { _chatGptTranscriber.Dispose(); } catch { }
         try { _transcriber.Dispose(); } catch (Exception ex) { Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Error disposing transcriber: {ex.Message}"); }
 
         Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Dispose complete");

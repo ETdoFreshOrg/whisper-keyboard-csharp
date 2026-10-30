@@ -9,6 +9,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "WhisperKeyboard", "src\Whis
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "WhisperKeyboard.Core", "src\WhisperKeyboard.Core\WhisperKeyboard.Core.csproj", "{CD39FD65-F158-4636-9993-7892B24A82B9}"
 EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{44820918-A28D-4062-9091-7EA9B36CC958}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "WhisperKeyboard.Core.Tests", "tests\WhisperKeyboard.Core.Tests\WhisperKeyboard.Core.Tests.csproj", "{3EF30879-3C5C-4A37-96BC-F95DDC1446AF}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -26,9 +30,14 @@ Global
 		{CD39FD65-F158-4636-9993-7892B24A82B9}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{CD39FD65-F158-4636-9993-7892B24A82B9}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{CD39FD65-F158-4636-9993-7892B24A82B9}.Release|Any CPU.Build.0 = Release|Any CPU
+		{3EF30879-3C5C-4A37-96BC-F95DDC1446AF}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{3EF30879-3C5C-4A37-96BC-F95DDC1446AF}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{3EF30879-3C5C-4A37-96BC-F95DDC1446AF}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{3EF30879-3C5C-4A37-96BC-F95DDC1446AF}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{6C4F327B-F5CF-4BE1-AC1D-5787B54CDF1A} = {34C84902-61EF-4640-8875-B308E189680B}
 		{CD39FD65-F158-4636-9993-7892B24A82B9} = {34C84902-61EF-4640-8875-B308E189680B}
+		{3EF30879-3C5C-4A37-96BC-F95DDC1446AF} = {44820918-A28D-4062-9091-7EA9B36CC958}
 	EndGlobalSection
 EndGlobal

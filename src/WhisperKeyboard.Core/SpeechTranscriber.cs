@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using NAudio.Lame;
 using NAudio.Wave;
+using WhisperKeyboard.Core.Transcription;
 
 namespace WhisperKeyboard.Core;
 
@@ -10,6 +11,7 @@ public class SpeechTranscriber : IDisposable
 {
     private readonly Config _config;
     private readonly HttpClient _httpClient;
+    private readonly HttpClient _chainClient; // no timeout of its own: the chain owns timeouts
     private bool _disposed;
 
     public SpeechTranscriber(Config config)
@@ -18,6 +20,10 @@ public class SpeechTranscriber : IDisposable
         _httpClient = new HttpClient
         {
             Timeout = TimeSpan.FromSeconds(30)
+        };
+        _chainClient = new HttpClient
+        {
+            Timeout = Timeout.InfiniteTimeSpan
         };
     }
 
@@ -166,37 +172,116 @@ public class SpeechTranscriber : IDisposable
         }
     }
 
-    private static byte[] ConvertToWav(byte[] pcmData, int sampleRate, int channels)
+    /// <summary>
+    /// Transcribe a clip for the fallback chain ("lan" backend). Unlike TranscribeAsync this
+    /// throws a <see cref="TranscriberException"/> with a one-line reason on any failure, so the
+    /// chain can fall through. Short clips go up as 16 kHz WAV; clips over a minute as MP3
+    /// (smaller), falling back to WAV where LAME is unavailable.
+    /// </summary>
+    public async Task<TranscriptionResult> TranscribeRecordingAsync(Recording recording, string language, CancellationToken cancellationToken)
     {
-        using var memoryStream = new MemoryStream();
-        using var writer = new BinaryWriter(memoryStream);
+        if (RequiresApiKey && string.IsNullOrEmpty(_config.ApiKey))
+            throw new TranscriberException("no API key set");
 
-        int bitsPerSample = 16;
-        int byteRate = sampleRate * channels * (bitsPerSample / 8);
-        int blockAlign = channels * (bitsPerSample / 8);
+        byte[] encodedData = recording.Wav;
+        string contentType = "audio/wav";
+        string fileName = "audio.wav";
+        if (recording.Duration > TimeSpan.FromMinutes(1) &&
+            TryConvertToMp3(recording.Pcm, recording.SampleRate, recording.Channels) is { } mp3)
+        {
+            encodedData = mp3;
+            contentType = "audio/mpeg";
+            fileName = "audio.mp3";
+        }
 
-        // RIFF header
-        writer.Write(new char[] { 'R', 'I', 'F', 'F' });
-        writer.Write(36 + pcmData.Length); // File size - 8
-        writer.Write(new char[] { 'W', 'A', 'V', 'E' });
+        using var request = new HttpRequestMessage(HttpMethod.Post, TranscriptionsUrl);
+        if (!string.IsNullOrEmpty(_config.ApiKey))
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _config.ApiKey);
 
-        // fmt chunk
-        writer.Write(new char[] { 'f', 'm', 't', ' ' });
-        writer.Write(16); // Chunk size
-        writer.Write((short)1); // Audio format (PCM)
-        writer.Write((short)channels);
-        writer.Write(sampleRate);
-        writer.Write(byteRate);
-        writer.Write((short)blockAlign);
-        writer.Write((short)bitsPerSample);
+        using var content = new MultipartFormDataContent();
+        var audioContent = new ByteArrayContent(encodedData);
+        audioContent.Headers.ContentType = new MediaTypeHeaderValue(contentType);
+        content.Add(audioContent, "file", fileName);
+        content.Add(new StringContent(string.IsNullOrWhiteSpace(_config.Model) ? "whisper-1" : _config.Model), "model");
+        if (!string.IsNullOrEmpty(language) && language != "auto")
+            content.Add(new StringContent(language), "language");
+        content.Add(new StringContent("verbose_json"), "response_format");
+        request.Content = content;
 
-        // data chunk
-        writer.Write(new char[] { 'd', 'a', 't', 'a' });
-        writer.Write(pcmData.Length);
-        writer.Write(pcmData);
+        HttpResponseMessage response;
+        try
+        {
+            response = await _chainClient.SendAsync(request, cancellationToken);
+        }
+        catch (HttpRequestException ex)
+        {
+            throw new TranscriberException($"can't reach {ServerName}: {ex.Message}", ex);
+        }
 
-        return memoryStream.ToArray();
+        using (response)
+        {
+            var responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                Console.WriteLine($"API Error: {response.StatusCode} - {responseBody}");
+                throw new TranscriberException($"{ServerName} returned HTTP {(int)response.StatusCode}");
+            }
+
+            WhisperApiResponse? result;
+            try
+            {
+                result = JsonSerializer.Deserialize<WhisperApiResponse>(responseBody, new JsonSerializerOptions
+                {
+                    PropertyNameCaseInsensitive = true
+                });
+            }
+            catch (JsonException)
+            {
+                result = null;
+            }
+
+            if (result?.Text == null)
+                throw new TranscriberException($"{ServerName} reply had no text");
+
+            return BuildResult(result);
+        }
     }
+
+    /// <summary>Host name of the configured server, for messages.</summary>
+    public string ServerName =>
+        Uri.TryCreate(TranscriptionsUrl, UriKind.Absolute, out var uri) ? uri.Host : "server";
+
+    /// <summary>
+    /// Cheap availability check: the base URL parses and a TCP connection to it opens
+    /// within the timeout. Returns null when usable, otherwise a one-line reason.
+    /// </summary>
+    public async Task<string?> CheckReachableAsync(TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        if (RequiresApiKey && string.IsNullOrEmpty(_config.ApiKey))
+            return "no API key set";
+        if (!Uri.TryCreate(TranscriptionsUrl, UriKind.Absolute, out var uri))
+            return "server URL is not valid";
+
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        cts.CancelAfter(timeout);
+        try
+        {
+            using var socket = new System.Net.Sockets.Socket(System.Net.Sockets.SocketType.Stream, System.Net.Sockets.ProtocolType.Tcp);
+            await socket.ConnectAsync(uri.Host, uri.Port, cts.Token);
+            return null;
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return $"{uri.Host} did not answer within {timeout.TotalSeconds:0} s";
+        }
+        catch (System.Net.Sockets.SocketException ex)
+        {
+            return $"can't reach {uri.Host}: {ex.Message}";
+        }
+    }
+
+    private static byte[] ConvertToWav(byte[] pcmData, int sampleRate, int channels) =>
+        Recording.BuildWav(pcmData, sampleRate, channels);
 
     private static byte[] ConvertToMp3(byte[] pcmData, int sampleRate, int channels)
     {
@@ -397,6 +482,7 @@ public class SpeechTranscriber : IDisposable
         if (_disposed) return;
 
         _httpClient.Dispose();
+        _chainClient.Dispose();
         _disposed = true;
     }
 

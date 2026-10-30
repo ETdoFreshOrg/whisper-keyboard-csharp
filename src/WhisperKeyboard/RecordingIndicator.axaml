@@ -200,6 +200,21 @@
                           Stretch="Uniform" />
                 </Button>
 
+                <!-- Save Audio Button (shown only after transcription failure) -->
+                <Button x:Name="SaveAudioButton"
+                        Width="32" Height="32"
+                        Background="#323232"
+                        BorderThickness="0"
+                        CornerRadius="16"
+                        Padding="0"
+                        ToolTip.Tip="Save audio to a WAV file"
+                        IsVisible="False">
+                    <Path Data="M15,9H5V5H15M12,19A3,3 0 0,1 9,16A3,3 0 0,1 12,13A3,3 0 0,1 15,16A3,3 0 0,1 12,19M17,3H5C3.89,3 3,3.9 3,5V19A2,2 0 0,0 5,21H19A2,2 0 0,0 21,19V7L17,3Z"
+                          Fill="#96C8FF"
+                          Width="14" Height="14"
+                          Stretch="Uniform" />
+                </Button>
+
                 <!-- Cancel Button (shown only while transcribing) -->
                 <Button x:Name="CancelButton"
                         Width="32" Height="32"

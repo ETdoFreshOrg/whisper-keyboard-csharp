@@ -55,6 +55,7 @@ public partial class RecordingIndicator : Window
     public event Action? OnRetryClicked;
     public event Action? OnDiscardClicked;
     public event Action? OnCancelClicked;
+    public event Action? OnSaveAudioClicked;
 
     public RecordingIndicator()
     {
@@ -80,6 +81,7 @@ public partial class RecordingIndicator : Window
         RetryButton.Click += (s, e) => OnRetryClicked?.Invoke();
         DiscardButton.Click += (s, e) => OnDiscardClicked?.Invoke();
         CancelButton.Click += (s, e) => OnCancelClicked?.Invoke();
+        SaveAudioButton.Click += (s, e) => OnSaveAudioClicked?.Invoke();
 
         // Enable dragging
         PointerPressed += OnPointerPressed;
@@ -569,13 +571,14 @@ public partial class RecordingIndicator : Window
         PinButton.IsVisible = false;
         RetryButton.IsVisible = false;
         DiscardButton.IsVisible = false;
+        SaveAudioButton.IsVisible = false;
         CancelButton.IsVisible = true;
     }
 
-    public void ShowTyping()
+    public void ShowTyping(string? source = null)
     {
         _isRecording = false;
-        StatusText.Text = "Typing...";
+        StatusText.Text = string.IsNullOrEmpty(source) ? "Typing..." : $"Typing ({source})...";
         StatusText.Foreground = new SolidColorBrush(Color.FromRgb(255, 255, 150));
         TimerText.IsVisible = false;
         _targetOpacity = ActiveOpacity;
@@ -804,6 +807,7 @@ public partial class RecordingIndicator : Window
         PinButton.IsVisible = false;
         RetryButton.IsVisible = false;
         DiscardButton.IsVisible = false;
+        SaveAudioButton.IsVisible = false;
         CancelButton.IsVisible = false;
         LongRecordButton.IsVisible = _longRecordButtonConfigured;
         PauseButton.IsVisible = true;
@@ -813,12 +817,15 @@ public partial class RecordingIndicator : Window
         SettingsButton.IsVisible = true;
     }
 
-    public void ShowTranscriptionFailed(string? errorMessage = null)
+    /// <param name="errorMessage">Short summary shown on the bar.</param>
+    /// <param name="details">Longer text (one line per backend) shown on hover.</param>
+    public void ShowTranscriptionFailed(string? errorMessage = null, string? details = null)
     {
         _isRecording = false;
         StatusText.Text = string.IsNullOrWhiteSpace(errorMessage)
             ? "Transcription failed"
             : $"Failed: {errorMessage}";
+        ToolTip.SetTip(StatusText, string.IsNullOrWhiteSpace(details) ? null : details);
         StatusText.Foreground = new SolidColorBrush(Color.FromRgb(255, 100, 100));
         TimerText.IsVisible = false;
         Opacity = ActiveOpacity;
@@ -838,6 +845,7 @@ public partial class RecordingIndicator : Window
         CancelButton.IsVisible = false;
         RetryButton.IsVisible = true;
         DiscardButton.IsVisible = true;
+        SaveAudioButton.IsVisible = true;
 
         if (!IsVisible) ShowWithoutActivation();
     }
