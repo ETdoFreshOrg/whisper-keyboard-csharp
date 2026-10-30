@@ -106,13 +106,35 @@ Each clip is sent to the backends below in order (Settings → Speech) until one
 
 1. **ChatGPT**: uses your Codex app's ChatGPT sign-in (`~/.codex/auth.json`, or `$CODEX_HOME/auth.json`). Sign in to Codex on this PC to use it. Audio goes up as Ogg/Opus.
 2. **Your server**: the OpenAI-compatible endpoint under "Your server" (default `https://stt.etdofresh.com`, with your API key).
-3. **Windows speech**: Windows' built-in offline recognizer. Least accurate; Windows only.
+3. **Windows speech / macOS speech**: the OS's own recognizer. Least accurate.
+   - Windows: the built-in offline recognizer (System.Speech).
+   - macOS: Apple's speech recognizer (`SFSpeechRecognizer`), run by the small `whisper-keyboard-speech` helper next to the app. It stays on the Mac when the language's on-device model is installed (English is), otherwise it uses Apple's servers. The first use asks for Speech Recognition permission, and it needs Dictation turned on (System Settings → Keyboard → Dictation).
 
-A backend that isn't usable (not signed in, server unreachable, not Windows) is skipped. Any error or timeout falls through to the next one, and a backend that just failed is tried last for the next two minutes. The bar shows which backend typed the text. If every backend fails, the clip is kept: hover the message to see why each one failed, then **Retry**, **Save audio** (writes a WAV next to `config.json` under `Recordings`), or **Discard**.
+A backend that isn't usable (not signed in, server unreachable, permission denied) is skipped. Any error or timeout falls through to the next one, and a backend that just failed is tried last for the next two minutes. The bar shows which backend typed the text. If every backend fails, the clip is kept: hover the message to see why each one failed, then **Retry**, **Save audio** (writes a WAV next to `config.json` under `Recordings`), or **Discard**.
 
 Push-to-talk taps shorter than 0.3 s are discarded (`PushToTalkMinHoldSeconds`).
 
 For tests, set `WHISPER_KEYBOARD_TRANSCRIBE_FIXTURE=some text` and every clip "transcribes" to that text without calling any backend. Unit tests: `dotnet test`.
+
+## macOS
+
+Builds and runs on Apple Silicon with the .NET 8 SDK. Needs:
+
+- `brew install openal-soft` for microphone capture (`scripts/publish.sh` copies it into the app).
+- Xcode or the Command Line Tools (`xcode-select --install`): the build compiles the macOS speech helper with `swiftc`. Without them the build only warns and the macOS speech backend is skipped.
+
+Build the app with `scripts/publish.sh`, which writes a self-contained, ad-hoc signed `publish/WhisperKeyboard.app`. Run it from there or copy it to `/Applications`. `dotnet run` also works for development, but macOS then asks permission for your terminal, not for Whisper Keyboard.
+
+On first launch a setup window lists the permissions. Grant them to **Whisper Keyboard** in System Settings → Privacy & Security:
+
+| Permission | Needed for |
+|------------|------------|
+| Accessibility | Typing or pasting text into other apps |
+| Input Monitoring | Global hotkeys and push-to-talk |
+| Microphone | Recording (asked on first use) |
+| Speech Recognition | The macOS speech fallback only (asked on first use) |
+
+The app is ad-hoc signed, so macOS treats each rebuild as a new app: after rebuilding, remove the old Whisper Keyboard entries in Accessibility and Input Monitoring and grant them again. Set `CODESIGN_IDENTITY` to a real signing identity before `scripts/publish.sh` to keep the grants across rebuilds.
 
 ## Exit Words
 
@@ -126,7 +148,7 @@ Default exit words: `over`, `enter`, `submit` (configurable in Settings → Typi
 
 ## Configuration File
 
-Settings are stored in: `%AppData%\WhisperKeyboard\config.json`
+Settings are stored in: `%AppData%\WhisperKeyboard\config.json` (Windows) or `~/Library/Application Support/WhisperKeyboard/config.json` (macOS)
 
 ## Troubleshooting
 

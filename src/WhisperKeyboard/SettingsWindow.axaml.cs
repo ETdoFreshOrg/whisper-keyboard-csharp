@@ -495,7 +495,7 @@ public partial class SettingsWindow : Window
     {
         TranscriptionSettings.ChatGpt => "ChatGPT (Codex sign-in)",
         TranscriptionSettings.Lan => "Your server (below)",
-        TranscriptionSettings.System => "Windows speech (offline)",
+        TranscriptionSettings.System => OperatingSystem.IsMacOS() ? "macOS speech (Apple)" : "Windows speech (offline)",
         _ => id
     };
 
@@ -582,7 +582,7 @@ public partial class SettingsWindow : Window
                 backend = new LanTranscriber(server);
                 break;
             default:
-                backend = new SystemSpeechTranscriber();
+                backend = SystemTranscriber.ForCurrentPlatform();
                 break;
         }
 

@@ -22,6 +22,8 @@
     <true/>
     <key>NSMicrophoneUsageDescription</key>
     <string>Whisper Keyboard needs access to the microphone for voice-to-text transcription.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Whisper Keyboard uses Apple speech recognition as an offline fallback when ChatGPT and your server can't transcribe a clip.</string>
     <key>NSAccessibilityUsageDescription</key>
     <string>Whisper Keyboard needs Accessibility access to type transcribed text by simulating keystrokes.</string>
     <key>NSHighResolutionCapable</key>

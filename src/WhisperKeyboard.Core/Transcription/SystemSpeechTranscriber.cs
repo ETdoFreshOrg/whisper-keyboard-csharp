@@ -7,7 +7,7 @@ namespace WhisperKeyboard.Core.Transcription;
 /// <summary>
 /// Last-resort offline backend: Windows' built-in speech recognizer (System.Speech
 /// dictation). Much less accurate than Whisper, but works with no network.
-/// Unavailable on macOS and Linux.
+/// Unavailable on macOS (see <see cref="AppleSpeechTranscriber"/>) and Linux.
 /// </summary>
 public sealed class SystemSpeechTranscriber : ITranscriber
 {

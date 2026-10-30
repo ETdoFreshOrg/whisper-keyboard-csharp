@@ -149,8 +149,35 @@ internal static partial class MacOSHelper
     private static partial void objc_msgSend_void_IntPtr(IntPtr receiver, IntPtr selector, IntPtr arg);
 
     // NSWindowCollectionBehavior flags
+    private const long NSWindowCollectionBehaviorCanJoinAllSpaces = 1 << 0; // on every desktop
     private const long NSWindowCollectionBehaviorTransient = 1 << 3;     // not managed by Mission Control
     private const long NSWindowCollectionBehaviorIgnoresCycle = 1 << 6;  // not in Cmd+Tab cycling
+
+    private const long NSWindowStyleMaskNonactivatingPanel = 1 << 7; // clicks don't activate the app
+    private const long NSFloatingWindowLevel = 5;
+
+    /// <summary>
+    /// Make an overlay float above other windows without taking keyboard focus from the
+    /// app being dictated into when clicked (macOS twin of WS_EX_NOACTIVATE).
+    /// </summary>
+    public static void MakeNonActivatingPanel(Window window)
+    {
+        try
+        {
+            var nsWindow = window.TryGetPlatformHandle()?.Handle ?? IntPtr.Zero;
+            if (nsWindow == IntPtr.Zero) return;
+
+            var styleMask = (long)objc_msgSend(nsWindow, sel_registerName("styleMask"));
+            objc_msgSend_long(nsWindow, sel_registerName("setStyleMask:"), styleMask | NSWindowStyleMaskNonactivatingPanel);
+            objc_msgSend_long(nsWindow, sel_registerName("setLevel:"), NSFloatingWindowLevel);
+            objc_msgSend_long(nsWindow, sel_registerName("setCollectionBehavior:"),
+                NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorTransient | NSWindowCollectionBehaviorIgnoresCycle);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Failed to make window non-activating: {ex.Message}");
+        }
+    }
 
     public static void HideWindowFromMissionControl(Window window)
     {

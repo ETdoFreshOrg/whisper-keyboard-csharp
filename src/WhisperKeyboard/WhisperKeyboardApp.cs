@@ -65,7 +65,7 @@ public class WhisperKeyboardApp : IDisposable
         _transcriptionChain = new TranscriptionChain(
             () => _config.Transcription,
             () => _config.Language,
-            new ITranscriber[] { _chatGptTranscriber, new LanTranscriber(_transcriber), new SystemSpeechTranscriber() });
+            new ITranscriber[] { _chatGptTranscriber, new LanTranscriber(_transcriber), SystemTranscriber.ForCurrentPlatform() });
         
         if (OperatingSystem.IsWindows())
         {
@@ -524,7 +524,7 @@ public class WhisperKeyboardApp : IDisposable
                 return;
             }
 
-            // Try each speech-to-text backend in turn (ChatGPT, your server, Windows speech).
+            // Try each speech-to-text backend in turn (ChatGPT, your server, Windows/macOS speech).
             var recording = new Recording(audioData, _config.SampleRate, _config.Channels);
             var chainResult = await _transcriptionChain.TranscribeAsync(recording, cancellationToken);
             TranscriptionResult? result = chainResult.Result;

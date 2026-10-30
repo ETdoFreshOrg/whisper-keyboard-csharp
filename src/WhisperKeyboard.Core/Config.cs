@@ -46,7 +46,7 @@ public class Config
     public string Language { get; set; } = "en";
 
     // Speech-to-text backends, tried in order until one returns text:
-    // ChatGPT (via the Codex sign-in), then the server above, then Windows speech.
+    // ChatGPT (via the Codex sign-in), then the server above, then Windows/macOS speech.
     public TranscriptionSettings Transcription { get; set; } = new();
 
     // Typing Settings

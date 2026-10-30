@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Embedded into the whisper-keyboard-speech binary (__TEXT,__info_plist). macOS
+     refuses Speech access to a process without NSSpeechRecognitionUsageDescription. -->
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.whisper-keyboard.speech</string>
+    <key>CFBundleName</key>
+    <string>Whisper Keyboard Speech</string>
+    <key>CFBundleVersion</key>
+    <string>1.0.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Whisper Keyboard uses Apple speech recognition as an offline fallback when ChatGPT and your server can't transcribe a clip.</string>
+</dict>
+</plist>

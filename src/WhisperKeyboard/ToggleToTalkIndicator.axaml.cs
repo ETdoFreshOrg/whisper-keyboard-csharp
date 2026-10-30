@@ -37,6 +37,10 @@ public partial class ToggleToTalkIndicator : Window
     {
         InitializeComponent();
 
+        // macOS: the first Show() must not pull focus from the app being dictated into.
+        if (OperatingSystem.IsMacOS())
+            ShowActivated = false;
+
         _timerTick = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
         _timerTick.Tick += (s, e) => UpdateTimerText();
 
@@ -235,6 +239,8 @@ public partial class ToggleToTalkIndicator : Window
 
     private void MakeNonActivating()
     {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+            MacOSHelper.MakeNonActivatingPanel(this);
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return;
         try
         {

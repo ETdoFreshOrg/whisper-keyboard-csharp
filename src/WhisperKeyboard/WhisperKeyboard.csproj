@@ -34,4 +34,32 @@
     <None Update="Info.plist" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <!-- macOS: build the "macOS speech" backend's helper (Apple SFSpeechRecognizer) with swiftc
+       from Xcode or the Command Line Tools and ship it next to the app. If swiftc is missing
+       the build only warns, and that backend reports itself unavailable. -->
+  <PropertyGroup Condition="$([MSBuild]::IsOSPlatform('OSX'))">
+    <SpeechHelperArch Condition="'$(RuntimeIdentifier)' == 'osx-x64'">x86_64</SpeechHelperArch>
+    <SpeechHelperArch Condition="'$(RuntimeIdentifier)' == '' And '$([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)' == 'X64'">x86_64</SpeechHelperArch>
+    <SpeechHelperArch Condition="'$(SpeechHelperArch)' == ''">arm64</SpeechHelperArch>
+  </PropertyGroup>
+
+  <ItemGroup Condition="$([MSBuild]::IsOSPlatform('OSX'))">
+    <SpeechHelperSource Include="macOS/SpeechHelper/main.swift;macOS/SpeechHelper/Info.plist" />
+  </ItemGroup>
+
+  <Target Name="BuildSpeechHelper" Condition="$([MSBuild]::IsOSPlatform('OSX'))"
+          Inputs="@(SpeechHelperSource)" Outputs="$(IntermediateOutputPath)whisper-keyboard-speech">
+    <MakeDir Directories="$(IntermediateOutputPath)" />
+    <Exec WorkingDirectory="$(MSBuildProjectDirectory)" ContinueOnError="true"
+          Command="xcrun swiftc -O -swift-version 5 -target $(SpeechHelperArch)-apple-macos11.0 -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker macOS/SpeechHelper/Info.plist macOS/SpeechHelper/main.swift -o &quot;$(IntermediateOutputPath)whisper-keyboard-speech&quot;" />
+  </Target>
+
+  <Target Name="IncludeSpeechHelper" BeforeTargets="AssignTargetPaths" DependsOnTargets="BuildSpeechHelper"
+          Condition="$([MSBuild]::IsOSPlatform('OSX'))">
+    <ItemGroup Condition="Exists('$(IntermediateOutputPath)whisper-keyboard-speech')">
+      <None Include="$(IntermediateOutputPath)whisper-keyboard-speech" Link="whisper-keyboard-speech"
+            CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    </ItemGroup>
+  </Target>
+
 </Project>
