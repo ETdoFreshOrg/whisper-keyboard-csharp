@@ -58,6 +58,11 @@ public class Config
     public bool CapitalizeSentences { get; set; } = true;
     public bool PasteMode { get; set; } = true; // Default to paste mode (more portable)
     public bool AutoEnter { get; set; } = false;
+    // After pasting or typing, read the focused field back (UI Automation on Windows,
+    // Accessibility on macOS) and retry when the field is provably unchanged.
+    public bool VerifyTextInsertion { get; set; } = true;
+    public int InsertionRetryCount { get; set; } = 2; // Extra attempts after the first: paste again, then type
+    public int InsertionVerifyTimeoutMs { get; set; } = 1500; // How long to wait for text to show up before retrying
     public bool ExitWordsEnabled { get; set; } = true;
     public List<string> ExitWords { get; set; } = new List<string> { "over", "enter", "submit" };
 

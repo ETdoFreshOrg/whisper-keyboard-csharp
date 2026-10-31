@@ -146,18 +146,59 @@ public static class WindowsInputSender
     public static void SendPaste()
     {
         // VK_CONTROL = 0x11, V = 0x56
-        var inputs = new List<INPUT>();
+        // Sent as separate calls with short gaps: some apps (browsers included) can miss
+        // a Ctrl+V whose four events arrive in the same instant, the same way terminals
+        // miss a space whose down and up arrive together (see SendVirtualSpace).
+        bool ok = SendOne(MakeKeyInput(0x11, false));
+        Thread.Sleep(15);
+        ok &= SendOne(MakeKeyInput(0x56, false));
+        Thread.Sleep(15);
+        ok &= SendOne(MakeKeyInput(0x56, true));
+        Thread.Sleep(15);
+        ok &= SendOne(MakeKeyInput(0x11, true));
 
-        // Ctrl Down
-        inputs.Add(MakeKeyInput(0x11, false));
-        // V Down
-        inputs.Add(MakeKeyInput(0x56, false));
-        // V Up
-        inputs.Add(MakeKeyInput(0x56, true));
-        // Ctrl Up
-        inputs.Add(MakeKeyInput(0x11, true));
+        if (!ok)
+        {
+            // ERROR_ACCESS_DENIED (5) here means the focused window runs as administrator,
+            // which Windows won't let a normal app send keystrokes to.
+            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] WindowsInputSender: SendInput for Ctrl+V was blocked (error {Marshal.GetLastWin32Error()})");
+        }
+    }
 
-        SendInput((uint)inputs.Count, inputs.ToArray(), INPUT.Size);
+    private static bool SendOne(INPUT input)
+    {
+        return SendInput(1, new[] { input }, INPUT.Size) == 1;
+    }
+
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int vKey);
+
+    // VK_SHIFT, VK_CONTROL, VK_MENU (Alt), VK_LWIN, VK_RWIN
+    private static readonly int[] ModifierVks = { 0x10, 0x11, 0x12, 0x5B, 0x5C };
+
+    /// <summary>
+    /// Waits until no modifier key is held (or the timeout passes). Push-to-talk stops
+    /// when either of its keys is released, so the other may still be down; a paste or
+    /// typed text sent then turns into Ctrl+Alt+V or a shortcut and goes nowhere.
+    /// </summary>
+    public static async Task WaitForModifiersReleasedAsync(TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        bool logged = false;
+        while (ModifierVks.Any(vk => (GetAsyncKeyState(vk) & 0x8000) != 0))
+        {
+            if (!logged)
+            {
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] WindowsInputSender: waiting for modifier keys to be released");
+                logged = true;
+            }
+            if (DateTime.UtcNow >= deadline)
+            {
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] WindowsInputSender: modifier keys still held after {timeout.TotalMilliseconds:F0} ms - sending anyway");
+                return;
+            }
+            await Task.Delay(20);
+        }
     }
 
     private static void SendKey(ushort vk)

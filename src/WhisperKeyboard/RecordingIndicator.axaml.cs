@@ -661,6 +661,28 @@ public partial class RecordingIndicator : Window
         }
     }
 
+    /// <summary>Dictated text never reached the focused field; it was left on the clipboard.</summary>
+    public async void ShowInsertionFailed()
+    {
+        const string message = "Didn't land - paste it";
+        _isRecording = false;
+        StatusText.Text = message;
+        StatusText.Foreground = new SolidColorBrush(Color.FromRgb(255, 160, 80)); // Orange
+        TimerText.IsVisible = false;
+        Opacity = ActiveOpacity;
+
+        _recordingTimer.Stop();
+
+        if (!IsVisible) ShowWithoutActivation();
+
+        await Task.Delay(3000);
+
+        if (StatusText.Text == message)
+        {
+            ShowListening();
+        }
+    }
+
     public async void ShowLowConfidence()
     {
         _isRecording = false;
