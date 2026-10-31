@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using WhisperKeyboard.Core.Transcription;
 
 namespace WhisperKeyboard.Core;
@@ -25,7 +26,13 @@ public class Config
     public int SampleRate { get; set; } = 16000;
     public int ChunkSize { get; set; } = 1024;
     public int Channels { get; set; } = 1;
-    public int DeviceIndex { get; set; } = -1; // -1 = default device
+    // Microphone by name; empty = the system default, followed as it changes.
+    // A named mic that isn't connected falls back to the default until it returns.
+    public string DeviceName { get; set; } = "";
+    // Legacy: older configs stored the mic as a position in the device list, which
+    // shifts as devices come and go. Read once to migrate to DeviceName, then dropped.
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? DeviceIndex { get; set; }
     public int VadThreshold { get; set; } = 500;
     public double SilenceThreshold { get; set; } = 0.5;
     public double MinSpeechDuration { get; set; } = 0.5;
@@ -86,8 +93,14 @@ public class Config
     // Which keys must be held for push-to-talk. A "+"-joined list of modifier
     // tokens (e.g. "RightOption+RightShift", "RightControl+RightShift", "Fn").
     // macOS: any combination of Left/Right Control/Shift/Option/Command and Fn.
-    // Windows: Left/Right Control/Shift/Alt/Win (Fn unsupported).
-    public string PushToTalkKeys { get; set; } = "RightOption+RightShift";
+    // Windows: Left/Right Control/Shift/Alt/Win (Fn unsupported). Empty = off.
+    // Releasing these types the text and presses Enter to submit it. Exit words
+    // and AutoEnter don't apply to push-to-talk: the key alone decides about Enter.
+    public string PushToTalkKeys { get; set; } = "RightCommand+RightShift";
+    // Push-to-talk that only types the text, without pressing Enter. Same format;
+    // empty = off. May contain PushToTalkKeys plus an extra key: if these keys are
+    // held at any point during a press, the press doesn't submit.
+    public string PushToTalkNoEnterKeys { get; set; } = "RightCommand+RightShift+RightOption";
     // Releasing the keys sooner than this discards the clip (an accidental tap).
     public double PushToTalkMinHoldSeconds { get; set; } = 0.3;
 

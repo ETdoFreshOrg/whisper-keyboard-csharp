@@ -34,7 +34,9 @@ public class WhisperKeyboardApp : IDisposable
     private bool _isTranscribing;
     private bool _isLongRecording;
     private bool _isPushToTalking;
-    private bool _wasPushToTalking; // Track if audio came from PTT for post-transcription behavior
+    private PushToTalkMode _pushToTalkMode; // Submit or type-only, for the press in progress
+    // Set (with its mode) when audio came from PTT, for typing and post-transcription behavior
+    private PushToTalkMode? _wasPushToTalking;
     private bool _insertionFailed; // Last transcription never reached the focused field
     private bool _wasLongRecording; // Track if audio came from long recording for transcription method
     private bool _toggleToTalkAutoStarted; // Toggle-to-Talk auto-started listening; bar stays hidden, stop listening after txn
@@ -47,7 +49,7 @@ public class WhisperKeyboardApp : IDisposable
     // Stashed audio from a failed transcription, awaiting user Retry/Discard.
     private byte[]? _lastFailedAudio;
     private bool _lastFailedWasLong;
-    private bool _lastFailedWasPtt;
+    private PushToTalkMode? _lastFailedPushToTalk;
     private DateTime _pushToTalkStartedAt;
     private bool _discardNextAudio; // set while a too-short push-to-talk tap is being thrown away
 
@@ -88,6 +90,8 @@ public class WhisperKeyboardApp : IDisposable
         _textTyper = new ClipboardTextTyper(_config, clipboard);
         _textTyper.InsertionFailed += OnInsertionFailed;
 
+        MigrateLegacyDeviceIndex();
+
         // Setup audio events
         _audioCapture.VolumeChanged += OnVolumeChanged;
         _audioCapture.SpeechDetected += OnSpeechDetected;
@@ -118,17 +122,19 @@ public class WhisperKeyboardApp : IDisposable
         // Register global hotkeys
         RegisterHotkeys();
 
-        // Setup push-to-talk hook
-        if (_config.PushToTalkEnabled)
+        // Setup push-to-talk hook (two key sets: one submits with Enter, one just types)
+        if (_config.PushToTalkEnabled &&
+            (!string.IsNullOrWhiteSpace(_config.PushToTalkKeys) || !string.IsNullOrWhiteSpace(_config.PushToTalkNoEnterKeys)))
         {
             if (OperatingSystem.IsWindows())
-                _pushToTalkHook = new PushToTalkHook(_config.PushToTalkKeys);
+                _pushToTalkHook = new PushToTalkHook(_config.PushToTalkKeys, _config.PushToTalkNoEnterKeys);
             else if (OperatingSystem.IsMacOS())
-                _pushToTalkHook = new PushToTalkHookMacOS(_config.PushToTalkKeys);
+                _pushToTalkHook = new PushToTalkHookMacOS(_config.PushToTalkKeys, _config.PushToTalkNoEnterKeys);
 
             if (_pushToTalkHook != null)
             {
                 _pushToTalkHook.Started += StartPushToTalk;
+                _pushToTalkHook.ModeChanged += OnPushToTalkModeChanged;
                 _pushToTalkHook.Stopped += StopPushToTalk;
             }
         }
@@ -159,6 +165,25 @@ public class WhisperKeyboardApp : IDisposable
             if (_config.PreRollEnabled)
                 _audioCapture.StartMonitoring();
         }
+    }
+
+    /// <summary>
+    /// Older configs stored the mic as a position in the device list; convert it to
+    /// the device's name (best effort: the list may have shifted since) and drop it.
+    /// </summary>
+    private void MigrateLegacyDeviceIndex()
+    {
+        if (_config.DeviceIndex is not int legacyIndex) return;
+
+        if (legacyIndex >= 0 && string.IsNullOrEmpty(_config.DeviceName))
+        {
+            var devices = _audioCapture.GetAudioDevices();
+            if (legacyIndex < devices.Count)
+                _config.DeviceName = devices[legacyIndex];
+        }
+        _config.DeviceIndex = null;
+        _config.Save();
+        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Migrated microphone setting to: {(_config.DeviceName == "" ? "Default" : _config.DeviceName)}");
     }
 
     private void RegisterHotkeys()
@@ -481,7 +506,7 @@ public class WhisperKeyboardApp : IDisposable
         // The ignore window keeps voice detection from picking up stray audio right after
         // typing. Push-to-talk and toggle recordings are explicit, so they skip it;
         // otherwise a second push-to-talk within 2 seconds of the last text was lost.
-        if (DateTime.Now < _ignoreUntil && !_wasLongRecording && !_wasPushToTalking)
+        if (DateTime.Now < _ignoreUntil && !_wasLongRecording && _wasPushToTalking == null)
         {
             Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Skipping - in ignore period");
             return;
@@ -490,17 +515,20 @@ public class WhisperKeyboardApp : IDisposable
         var audioData = e.AudioData;
         var totalDuration = e.TotalDuration;
         var isFromLongRecording = _wasLongRecording;
-        var isFromPushToTalk = _wasPushToTalking;
+        var pushToTalk = _wasPushToTalking;
         _wasLongRecording = false;
-        _wasPushToTalking = false;
+        _wasPushToTalking = null;
 
         Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Audio ready - {audioData.Length} bytes, total duration: {totalDuration.TotalSeconds:F2}s");
 
-        await RunTranscriptionAsync(audioData, isFromLongRecording, isFromPushToTalk);
+        await RunTranscriptionAsync(audioData, isFromLongRecording, pushToTalk);
     }
 
-    private async Task RunTranscriptionAsync(byte[] audioData, bool isFromLongRecording, bool isFromPushToTalk)
+    /// <param name="pushToTalk">Null unless the audio came from push-to-talk; then its
+    /// mode decides whether Enter is pressed after typing.</param>
+    private async Task RunTranscriptionAsync(byte[] audioData, bool isFromLongRecording, PushToTalkMode? pushToTalk)
     {
+        bool isFromPushToTalk = pushToTalk != null;
         _isTranscribing = true;
 
         // Pause mic capture during transcription so we don't pick up stray audio
@@ -517,7 +545,7 @@ public class WhisperKeyboardApp : IDisposable
             _recordingIndicator.ShowTranscribing();
         });
 
-        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Transcribing {audioData.Length} bytes, long recording: {isFromLongRecording}, PTT: {isFromPushToTalk}, sending to API...");
+        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Transcribing {audioData.Length} bytes, long recording: {isFromLongRecording}, PTT: {pushToTalk?.ToString() ?? "no"}, sending to API...");
 
         bool transcriptionFailed = false;
         try
@@ -569,11 +597,11 @@ public class WhisperKeyboardApp : IDisposable
                 // Handle wake word / pause word logic
                 else if (_config.WakeWordsEnabled)
                 {
-                    await HandleWakeWordModeAsync(result);
+                    await HandleWakeWordModeAsync(result, pushToTalk);
                 }
                 else
                 {
-                    await TypeTranscriptionAsync(result, explicitRequest: isFromLongRecording || isFromPushToTalk);
+                    await TypeTranscriptionAsync(result, pushToTalk, explicitRequest: isFromLongRecording || isFromPushToTalk);
                 }
             }
             else
@@ -593,7 +621,7 @@ public class WhisperKeyboardApp : IDisposable
             transcriptionFailed = true;
             _lastFailedAudio = audioData;
             _lastFailedWasLong = isFromLongRecording;
-            _lastFailedWasPtt = isFromPushToTalk;
+            _lastFailedPushToTalk = pushToTalk;
 
             var errMsg = ex is AllBackendsFailedException failed
                 ? FailureSummary(failed)
@@ -711,12 +739,12 @@ public class WhisperKeyboardApp : IDisposable
 
         var audio = _lastFailedAudio;
         var wasLong = _lastFailedWasLong;
-        var wasPtt = _lastFailedWasPtt;
+        var pushToTalk = _lastFailedPushToTalk;
         // Clear up-front so RunTranscriptionAsync's finally block can resume the mic on success.
         _lastFailedAudio = null;
 
         Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Retrying failed transcription ({audio.Length} bytes)");
-        _ = RunTranscriptionAsync(audio, wasLong, wasPtt);
+        _ = RunTranscriptionAsync(audio, wasLong, pushToTalk);
     }
 
     private void CancelTranscription()
@@ -734,7 +762,7 @@ public class WhisperKeyboardApp : IDisposable
     {
         if (_lastFailedAudio == null) return;
 
-        var wasPtt = _lastFailedWasPtt;
+        var wasPtt = _lastFailedPushToTalk != null;
         _lastFailedAudio = null;
         Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Transcription discarded by user");
 
@@ -861,7 +889,7 @@ public class WhisperKeyboardApp : IDisposable
         });
     }
 
-    private async Task HandleWakeWordModeAsync(TranscriptionResult result)
+    private async Task HandleWakeWordModeAsync(TranscriptionResult result, PushToTalkMode? pushToTalk)
     {
         var text = result.Text;
 
@@ -919,12 +947,12 @@ public class WhisperKeyboardApp : IDisposable
             else
             {
                 // Normal transcription - type it
-                await TypeTranscriptionAsync(result);
+                await TypeTranscriptionAsync(result, pushToTalk);
             }
         }
     }
 
-    private async Task TypeTranscriptionAsync(TranscriptionResult result, bool explicitRequest = false)
+    private async Task TypeTranscriptionAsync(TranscriptionResult result, PushToTalkMode? pushToTalk, bool explicitRequest = false)
     {
         _history.AddEntry(result);
 
@@ -935,7 +963,7 @@ public class WhisperKeyboardApp : IDisposable
         });
 
         _insertionFailed = false;
-        await _textTyper.TypeTextAsync(result.Text, explicitRequest);
+        await _textTyper.TypeTextAsync(result.Text, pushToTalk, explicitRequest);
         _ignoreUntil = DateTime.Now.AddSeconds(2);
 
         Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Typed successfully");
@@ -1056,7 +1084,7 @@ public class WhisperKeyboardApp : IDisposable
         Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Long recording stopped");
     }
 
-    private void StartPushToTalk()
+    private void StartPushToTalk(PushToTalkMode mode)
     {
         // Block PTT while a transcription is in flight or a failed one is still
         // awaiting the user's Retry/Discard choice — otherwise the new audio would
@@ -1070,12 +1098,14 @@ public class WhisperKeyboardApp : IDisposable
         {
             _pttPostRollCts.Cancel();
             _isPushToTalking = true;
+            // Same recording continues: type-only from either press wins.
+            if (mode == PushToTalkMode.TypeOnly) _pushToTalkMode = mode;
             Dispatcher.UIThread.Post(() =>
             {
-                UpdateStatus("Push to Talk...");
+                UpdateStatus(PushToTalkStatus());
                 _recordingIndicator.ShowPushToTalk();
             });
-            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Push-to-Talk resumed during post-roll");
+            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Push-to-Talk resumed during post-roll ({_pushToTalkMode})");
             return;
         }
 
@@ -1101,17 +1131,31 @@ public class WhisperKeyboardApp : IDisposable
             return;
 
         _isPushToTalking = true;
+        _pushToTalkMode = mode;
         _pushToTalkStartedAt = DateTime.Now;
         _audioCapture.StartLongRecording(); // Reuse long recording buffer (captures all audio, bypasses VAD)
 
         Dispatcher.UIThread.Post(() =>
         {
-            UpdateStatus("Push to Talk...");
+            UpdateStatus(PushToTalkStatus());
             _recordingIndicator.ShowPushToTalk();
         });
 
-        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Push-to-Talk started (Right Ctrl + Right Shift)");
+        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Push-to-Talk started ({mode})");
     }
+
+    /// <summary>The type-only keys joined mid-press: this recording won't press Enter.</summary>
+    private void OnPushToTalkModeChanged(PushToTalkMode mode)
+    {
+        if (!_isPushToTalking) return;
+
+        _pushToTalkMode = mode;
+        UpdateStatus(PushToTalkStatus());
+        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Push-to-Talk mode: {mode}");
+    }
+
+    private string PushToTalkStatus() =>
+        _pushToTalkMode == PushToTalkMode.TypeOnly ? "Push to Talk (no Enter)..." : "Push to Talk...";
 
     private void PinFromPushToTalk()
     {
@@ -1121,7 +1165,7 @@ public class WhisperKeyboardApp : IDisposable
         // Stop PTT recording but keep the bar up in normal listening mode
         _isPushToTalking = false;
         _wasLongRecording = true;
-        _wasPushToTalking = false; // NOT a PTT exit — stay in listening mode after transcription
+        _wasPushToTalking = null; // NOT a PTT exit — stay in listening mode after transcription
         _audioCapture.StopLongRecording();
 
         Dispatcher.UIThread.Post(() =>
@@ -1184,7 +1228,7 @@ public class WhisperKeyboardApp : IDisposable
         // May have already been finalized (or cancelled) by a re-press or Stop.
         if (!_audioCapture.IsLongRecording) return;
 
-        _wasPushToTalking = true;
+        _wasPushToTalking = _pushToTalkMode;
         _wasLongRecording = true; // Route through long recording transcription path
         _audioCapture.StopLongRecording();
 

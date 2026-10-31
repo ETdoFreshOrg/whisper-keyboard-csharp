@@ -243,18 +243,25 @@ public partial class SettingsWindow : Window
                 devices = OpenALNative.GetCaptureDeviceNames();
             }
 
+            // Default follows the system setting; mics are stored by name ("" = default).
             DeviceBox.Items.Clear();
-            DeviceBox.Items.Add(new ComboBoxItem { Content = "Default", Tag = -1 });
-            for (int i = 0; i < devices.Count; i++)
+            DeviceBox.Items.Add(new ComboBoxItem { Content = "Default (follows system setting)", Tag = "" });
+            foreach (var device in devices)
             {
-                DeviceBox.Items.Add(new ComboBoxItem { Content = devices[i], Tag = i });
+                DeviceBox.Items.Add(new ComboBoxItem { Content = device, Tag = device });
             }
-            DeviceBox.SelectedIndex = _config.DeviceIndex + 1; // +1 because of "Default"
+            // Keep a saved mic selectable while it's unplugged, so saving doesn't lose it.
+            if (!string.IsNullOrEmpty(_config.DeviceName) && !devices.Contains(_config.DeviceName))
+            {
+                DeviceBox.Items.Add(new ComboBoxItem { Content = $"{_config.DeviceName} (not connected)", Tag = _config.DeviceName });
+            }
+            DeviceBox.SelectedIndex = Math.Max(0, DeviceBox.Items.Cast<ComboBoxItem>()
+                .ToList().FindIndex(item => (string?)item.Tag == _config.DeviceName));
         }
         catch (Exception ex)
         {
             Console.WriteLine($"Failed to enumerate devices: {ex.Message}");
-            DeviceBox.Items.Add(new ComboBoxItem { Content = "Default", Tag = -1 });
+            DeviceBox.Items.Add(new ComboBoxItem { Content = "Default (follows system setting)", Tag = "" });
             DeviceBox.SelectedIndex = 0;
         }
 
@@ -302,15 +309,8 @@ public partial class SettingsWindow : Window
         LongRecordHotkeyBox.Text = _config.LongRecordHotkey;
 
         // Push-to-talk keys
-        for (int i = 0; i < PushToTalkKeysBox.Items.Count; i++)
-        {
-            if (PushToTalkKeysBox.Items[i] is ComboBoxItem item &&
-                string.Equals(item.Tag?.ToString(), _config.PushToTalkKeys, StringComparison.OrdinalIgnoreCase))
-            {
-                PushToTalkKeysBox.SelectedIndex = i;
-                break;
-            }
-        }
+        PopulatePushToTalkBox(PushToTalkKeysBox, _config.PushToTalkKeys);
+        PopulatePushToTalkBox(PushToTalkNoEnterKeysBox, _config.PushToTalkNoEnterKeys);
 
         // Long recording settings
         ShowLongRecordButtonCheck.IsChecked = _config.ShowLongRecordButton;
@@ -318,6 +318,46 @@ public partial class SettingsWindow : Window
 
         // Load history
         LoadHistory();
+    }
+
+    /// <summary>
+    /// Push-to-talk choices: every combination of the right-hand modifiers (fewest
+    /// keys first) except Right Shift alone, which would fire on every capital letter,
+    /// plus Left Shift + Left Control and Fn (macOS only). Tags are normalized specs.
+    /// </summary>
+    private static List<string> PushToTalkPresets()
+    {
+        string[] right = { "RightShift", "RightCommand", "RightOption", "RightControl" };
+        var combos = new List<string>();
+        for (int mask = 1; mask < 1 << right.Length; mask++)
+        {
+            var keys = right.Where((_, i) => (mask & (1 << i)) != 0).ToArray();
+            if (keys is ["RightShift"]) continue;
+            combos.Add(PushToTalkKeySpec.Normalize(string.Join("+", keys)));
+        }
+
+        var presets = combos.OrderBy(c => c.Count(ch => ch == '+')).ToList();
+        presets.Add(PushToTalkKeySpec.Normalize("LeftShift+LeftControl"));
+        if (!OperatingSystem.IsWindows()) presets.Add("Fn");
+        return presets;
+    }
+
+    private static void PopulatePushToTalkBox(ComboBox box, string configured)
+    {
+        bool windows = OperatingSystem.IsWindows();
+        var current = PushToTalkKeySpec.Normalize(configured);
+        var presets = PushToTalkPresets();
+        // A hand-edited combination that isn't a preset stays selectable.
+        if (current != "" && !presets.Contains(current)) presets.Add(current);
+
+        box.Items.Clear();
+        box.Items.Add(new ComboBoxItem { Content = "Off", Tag = "" });
+        foreach (var spec in presets)
+        {
+            box.Items.Add(new ComboBoxItem { Content = PushToTalkKeySpec.Describe(spec, windows), Tag = spec });
+        }
+        box.SelectedIndex = Math.Max(0, box.Items.Cast<ComboBoxItem>()
+            .ToList().FindIndex(item => (string?)item.Tag == current));
     }
 
     private void LoadHistory()
@@ -369,7 +409,7 @@ public partial class SettingsWindow : Window
         // Device
         if (DeviceBox.SelectedItem is ComboBoxItem deviceItem)
         {
-            _config.DeviceIndex = (int)(deviceItem.Tag ?? -1);
+            _config.DeviceName = (string?)deviceItem.Tag ?? "";
         }
 
         // Threshold
@@ -423,11 +463,9 @@ public partial class SettingsWindow : Window
         _config.OpenSettingsHotkey = OpenSettingsHotkeyBox.Text?.Trim() ?? "";
         _config.LongRecordHotkey = LongRecordHotkeyBox.Text?.Trim() ?? "";
 
-        // Push-to-talk keys
-        if (PushToTalkKeysBox.SelectedItem is ComboBoxItem pttItem)
-        {
-            _config.PushToTalkKeys = pttItem.Tag?.ToString() ?? "RightOption+RightShift";
-        }
+        // Push-to-talk keys ("" = off)
+        _config.PushToTalkKeys = (PushToTalkKeysBox.SelectedItem as ComboBoxItem)?.Tag as string ?? "";
+        _config.PushToTalkNoEnterKeys = (PushToTalkNoEnterKeysBox.SelectedItem as ComboBoxItem)?.Tag as string ?? "";
 
         // Long recording settings
         _config.ShowLongRecordButton = ShowLongRecordButtonCheck.IsChecked ?? false;

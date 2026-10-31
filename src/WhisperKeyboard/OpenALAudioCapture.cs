@@ -8,8 +8,19 @@ namespace WhisperKeyboard;
 /// </summary>
 public class OpenALAudioCapture : IAudioCapture
 {
+    // How often the capture thread checks whether the open device is still the one
+    // it should be (system default changed, or a different mic picked in Settings).
+    private static readonly TimeSpan DeviceCheckInterval = TimeSpan.FromSeconds(1);
+
     private readonly Config _config;
     private IntPtr _captureDevice;
+    // Guards _captureDevice: the capture thread may swap it out while other threads
+    // pause/resume it, and native calls on a closed handle crash.
+    private readonly object _deviceLock = new();
+    // Name of the device currently open, and whether it was opened as the system default.
+    private string? _openedDeviceName;
+    private bool _openedAsDefault;
+    private string? _lastReopenFailure;
     private Thread? _captureThread;
     private volatile bool _isRunning;
     private volatile bool _isPaused;
@@ -76,11 +87,14 @@ public class OpenALAudioCapture : IAudioCapture
     private void EnsureDeviceCapturing()
     {
         if (!_isPaused) return;
-        if (_captureDevice != IntPtr.Zero)
+        lock (_deviceLock)
         {
-            OpenALNative.CaptureStart(_captureDevice);
+            if (_captureDevice != IntPtr.Zero)
+            {
+                OpenALNative.CaptureStart(_captureDevice);
+            }
+            _isPaused = false;
         }
-        _isPaused = false;
     }
 
     public void StartMonitoring()
@@ -96,35 +110,19 @@ public class OpenALAudioCapture : IAudioCapture
     {
         try
         {
-            // Get device name (null = default)
-            string? deviceName = null;
-            if (_config.DeviceIndex >= 0)
+            lock (_deviceLock)
             {
-                var devices = GetAudioDevices();
-                if (_config.DeviceIndex < devices.Count)
+                _captureDevice = OpenConfiguredDevice();
+
+                if (_captureDevice == IntPtr.Zero)
                 {
-                    deviceName = devices[_config.DeviceIndex];
+                    throw new Exception("Failed to open audio capture device. Make sure a microphone is connected and permissions are granted.");
                 }
+
+                OpenALNative.CaptureStart(_captureDevice);
+                _isRunning = true;
+                _isPaused = false;
             }
-
-            // Open capture device
-            // Format: 16-bit mono PCM
-            int bufferSize = _config.SampleRate; // 1 second buffer
-            _captureDevice = OpenALNative.CaptureOpenDevice(
-                deviceName,
-                _config.SampleRate,
-                OpenALNative.AL_FORMAT_MONO16,
-                bufferSize
-            );
-
-            if (_captureDevice == IntPtr.Zero)
-            {
-                throw new Exception("Failed to open audio capture device. Make sure a microphone is connected and permissions are granted.");
-            }
-
-            OpenALNative.CaptureStart(_captureDevice);
-            _isRunning = true;
-            _isPaused = false;
 
             // Start capture thread
             _captureThread = new Thread(CaptureLoop)
@@ -134,13 +132,114 @@ public class OpenALAudioCapture : IAudioCapture
             };
             _captureThread.Start();
 
-            Console.WriteLine($"Audio capture started (device: {deviceName ?? "default"})");
+            Console.WriteLine($"Audio capture started (device: {DescribeOpenedDevice()})");
         }
         catch (Exception ex)
         {
             Console.WriteLine($"Error starting audio capture: {ex.Message}");
             throw;
         }
+    }
+
+    /// <summary>
+    /// The configured mic if it's connected, otherwise null (= the system default).
+    /// </summary>
+    private string? ConnectedConfiguredDevice()
+    {
+        var name = _config.DeviceName;
+        return !string.IsNullOrEmpty(name) && GetAudioDevices().Contains(name) ? name : null;
+    }
+
+    /// <summary>
+    /// Opens the configured mic, or the current system default when none is set or
+    /// it isn't connected, and records what was opened. Returns IntPtr.Zero on failure.
+    /// Caller must hold _deviceLock.
+    /// </summary>
+    private IntPtr OpenConfiguredDevice()
+    {
+        // Get device name (null = default)
+        string? deviceName = ConnectedConfiguredDevice();
+
+        // Read the default's name before opening: if it changes in between, the next
+        // device check sees a mismatch and reopens instead of missing the change.
+        string? openedName = deviceName ?? OpenALNative.GetDefaultCaptureDeviceName();
+
+        // Open capture device
+        // Format: 16-bit mono PCM
+        int bufferSize = _config.SampleRate; // 1 second buffer
+        var device = OpenALNative.CaptureOpenDevice(
+            deviceName,
+            _config.SampleRate,
+            OpenALNative.AL_FORMAT_MONO16,
+            bufferSize
+        );
+
+        if (device != IntPtr.Zero)
+        {
+            _openedDeviceName = openedName;
+            _openedAsDefault = deviceName == null;
+        }
+        return device;
+    }
+
+    private string DescribeOpenedDevice() =>
+        _openedAsDefault ? $"default: {_openedDeviceName ?? "unknown"}" : _openedDeviceName ?? "unknown";
+
+    /// <summary>
+    /// The device stays open between recordings (pre-roll keeps it warm), and
+    /// OpenAL resolves "default" only when opening, so without this a Default mic
+    /// stays pinned to whatever was default at launch. Reopens when the system
+    /// default input changes, a different mic is picked in Settings, or the
+    /// configured mic is plugged in or unplugged. Runs on the capture thread.
+    /// </summary>
+    private void ReopenIfDeviceChanged()
+    {
+        var configured = ConnectedConfiguredDevice();
+        var wanted = configured ?? OpenALNative.GetDefaultCaptureDeviceName();
+        // No input devices at all — keep whatever is open rather than dropping it.
+        if (wanted == null) return;
+        if (wanted == _openedDeviceName)
+        {
+            // Same device, now picked by name (or back to default): nothing to reopen.
+            _openedAsDefault = configured == null;
+            return;
+        }
+        string target = configured ?? $"default: {wanted}";
+
+        string previous = DescribeOpenedDevice();
+        lock (_deviceLock)
+        {
+            if (!_isRunning) return;
+
+            // Open the new device before closing the old one so a failed open
+            // (e.g. a Bluetooth headset still switching profiles) keeps capturing
+            // from the old device; the next check retries.
+            var newDevice = OpenConfiguredDevice();
+            if (newDevice == IntPtr.Zero)
+            {
+                // Log once per target, not on every retry.
+                if (_lastReopenFailure != target)
+                {
+                    _lastReopenFailure = target;
+                    Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Failed to switch microphone to {target}; staying on {previous}");
+                }
+                return;
+            }
+            _lastReopenFailure = null;
+
+            if (_captureDevice != IntPtr.Zero)
+            {
+                OpenALNative.CaptureStop(_captureDevice);
+                OpenALNative.CaptureCloseDevice(_captureDevice);
+            }
+            _captureDevice = newDevice;
+            if (!_isPaused)
+            {
+                OpenALNative.CaptureStart(_captureDevice);
+            }
+        }
+
+        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Microphone switched from {previous} to {DescribeOpenedDevice()}");
     }
 
     public void Stop()
@@ -174,11 +273,14 @@ public class OpenALAudioCapture : IAudioCapture
         _isMonitoring = false;
         _captureThread?.Join(1000);
 
-        if (_captureDevice != IntPtr.Zero)
+        lock (_deviceLock)
         {
-            OpenALNative.CaptureStop(_captureDevice);
-            OpenALNative.CaptureCloseDevice(_captureDevice);
-            _captureDevice = IntPtr.Zero;
+            if (_captureDevice != IntPtr.Zero)
+            {
+                OpenALNative.CaptureStop(_captureDevice);
+                OpenALNative.CaptureCloseDevice(_captureDevice);
+                _captureDevice = IntPtr.Zero;
+            }
         }
 
         Console.WriteLine("Audio capture stopped");
@@ -186,10 +288,13 @@ public class OpenALAudioCapture : IAudioCapture
 
     public void Pause()
     {
-        _isPaused = true;
-        if (_captureDevice != IntPtr.Zero)
+        lock (_deviceLock)
         {
-            OpenALNative.CaptureStop(_captureDevice);
+            _isPaused = true;
+            if (_captureDevice != IntPtr.Zero)
+            {
+                OpenALNative.CaptureStop(_captureDevice);
+            }
         }
     }
 
@@ -203,11 +308,14 @@ public class OpenALAudioCapture : IAudioCapture
             _lastSpeechTime = DateTime.Now;
         }
 
-        if (_captureDevice != IntPtr.Zero)
+        lock (_deviceLock)
         {
-            OpenALNative.CaptureStart(_captureDevice);
+            if (_captureDevice != IntPtr.Zero)
+            {
+                OpenALNative.CaptureStart(_captureDevice);
+            }
+            _isPaused = false;
         }
-        _isPaused = false;
     }
 
     private void CaptureLoop()
@@ -216,9 +324,24 @@ public class OpenALAudioCapture : IAudioCapture
         int samplesPerBuffer = _config.SampleRate / 20; // 50ms worth
         var buffer = new short[samplesPerBuffer];
         var byteBuffer = new byte[samplesPerBuffer * 2]; // 16-bit = 2 bytes per sample
+        var nextDeviceCheck = DateTime.UtcNow + DeviceCheckInterval;
 
         while (_isRunning)
         {
+            // Checked while paused too, so resuming doesn't start on a stale mic.
+            if (DateTime.UtcNow >= nextDeviceCheck)
+            {
+                nextDeviceCheck = DateTime.UtcNow + DeviceCheckInterval;
+                try
+                {
+                    ReopenIfDeviceChanged();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Device check error: {ex.Message}");
+                }
+            }
+
             if (_isPaused)
             {
                 Thread.Sleep(50);
@@ -227,14 +350,21 @@ public class OpenALAudioCapture : IAudioCapture
 
             try
             {
-                // Check how many samples are available
-                int samplesAvailable = OpenALNative.GetCapturedSamples(_captureDevice);
-
-                if (samplesAvailable >= samplesPerBuffer)
+                bool captured = false;
+                lock (_deviceLock)
                 {
-                    // Capture samples
-                    OpenALNative.CaptureSamples(_captureDevice, buffer, samplesPerBuffer);
+                    // Check how many samples are available
+                    if (_captureDevice != IntPtr.Zero &&
+                        OpenALNative.GetCapturedSamples(_captureDevice) >= samplesPerBuffer)
+                    {
+                        // Capture samples
+                        OpenALNative.CaptureSamples(_captureDevice, buffer, samplesPerBuffer);
+                        captured = true;
+                    }
+                }
 
+                if (captured)
+                {
                     // Convert to bytes
                     Buffer.BlockCopy(buffer, 0, byteBuffer, 0, byteBuffer.Length);
 

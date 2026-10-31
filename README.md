@@ -70,7 +70,7 @@ Access settings by right-clicking the tray icon → Settings, or double-click th
 
 ### Audio
 
-- **Device**: Select input microphone
+- **Device**: Select input microphone. "Default" follows the system's input setting, switching within a second when it changes. A chosen mic is saved by name; while it's unplugged the default is used, and it switches back when the mic returns.
 - **VAD Threshold**: Voice detection sensitivity (use Calibrate for best results)
 - **Min Audio Duration**: Minimum speech length to process (default: 1.5s)
 - **Max Silence Duration**: Silence before ending recording (default: 1.0s)
@@ -112,6 +112,15 @@ Each clip is sent to the backends below in order (Settings → Speech) until one
 
 A backend that isn't usable (not signed in, server unreachable, permission denied) is skipped. Any error or timeout falls through to the next one, and a backend that just failed is tried last for the next two minutes. The bar shows which backend typed the text. If every backend fails, the clip is kept: hover the message to see why each one failed, then **Retry**, **Save audio** (writes a WAV next to `config.json` under `Recordings`), or **Discard**.
 
+## Push-to-Talk
+
+Hold the keys to record, release to transcribe (Settings → Hotkeys). There are two key sets:
+
+- **Push-to-Talk** (default Right Shift + Right Command): types the text and presses Enter to submit it.
+- **Push-to-Talk without Enter** (default Right Shift + Right Command + Right Option): only types the text.
+
+The second set can be the first plus one more key. Recording starts as soon as the first two keys are down; if the extra key is held at any point during the press, Enter isn't pressed. Exit words don't apply to push-to-talk: "over" is typed as spoken, and only the keys decide whether Enter is pressed.
+
 Push-to-talk taps shorter than 0.3 s are discarded (`PushToTalkMinHoldSeconds`).
 
 For tests, set `WHISPER_KEYBOARD_TRANSCRIBE_FIXTURE=some text` and every clip "transcribes" to that text without calling any backend. Unit tests: `dotnet test`.
@@ -138,7 +147,7 @@ The app is ad-hoc signed, so macOS treats each rebuild as a new app: after rebui
 
 ## Exit Words
 
-Exit words let you end input and press Enter by voice. When enabled:
+Exit words let you end input and press Enter by voice (in hands-free listening; push-to-talk uses its keys instead). When enabled:
 
 1. Say your text followed by an exit word: *"My email is john@example.com over"*
 2. The exit word ("over") is removed from the text

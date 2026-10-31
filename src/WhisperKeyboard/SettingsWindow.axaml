@@ -229,19 +229,11 @@
 
                         <Border BorderBrush="#333333" BorderThickness="0,1,0,0" Margin="0,10,0,0" Padding="0,12,0,0">
                             <StackPanel Spacing="5">
-                                <TextBlock Text="Push-to-Talk (hold to talk)" FontSize="12" Foreground="#888888" FontWeight="SemiBold"/>
-                                <ComboBox x:Name="PushToTalkKeysBox" HorizontalAlignment="Stretch" SelectedIndex="0">
-                                    <ComboBoxItem Content="Right Option + Right Shift" Tag="RightOption+RightShift"/>
-                                    <ComboBoxItem Content="Right Control + Right Shift" Tag="RightControl+RightShift"/>
-                                    <ComboBoxItem Content="Right Command + Right Shift" Tag="RightCommand+RightShift"/>
-                                    <ComboBoxItem Content="Right Option + Right Command" Tag="RightOption+RightCommand"/>
-                                    <ComboBoxItem Content="Left Control + Left Shift" Tag="LeftControl+LeftShift"/>
-                                    <ComboBoxItem Content="Right Option (alone)" Tag="RightOption"/>
-                                    <ComboBoxItem Content="Right Command (alone)" Tag="RightCommand"/>
-                                    <ComboBoxItem Content="Right Control (alone)" Tag="RightControl"/>
-                                    <ComboBoxItem Content="Fn (globe)" Tag="Fn"/>
-                                </ComboBox>
-                                <TextBlock Text="Hold these keys to record, release to transcribe. Modifier keys only (they don't type characters). Requires Input Monitoring permission. Changes require restart."
+                                <TextBlock Text="Push-to-Talk (hold to talk, then submit with Enter)" FontSize="12" Foreground="#888888" FontWeight="SemiBold"/>
+                                <ComboBox x:Name="PushToTalkKeysBox" HorizontalAlignment="Stretch"/>
+                                <TextBlock Text="Push-to-Talk without Enter (just types the text)" FontSize="12" Foreground="#888888" FontWeight="SemiBold" Margin="0,8,0,0"/>
+                                <ComboBox x:Name="PushToTalkNoEnterKeysBox" HorizontalAlignment="Stretch"/>
+                                <TextBlock Text="Hold the keys to record, release to transcribe. Exit words like &quot;over&quot; don't apply to push-to-talk: they're typed as spoken, and the keys decide whether Enter is pressed. The second set can be the first plus one more key; adding that key at any point while holding means no Enter. Modifier keys only (they don't type characters). Requires Input Monitoring permission. Changes require restart."
                                            FontSize="10" Foreground="#666666" TextWrapping="Wrap"/>
                             </StackPanel>
                         </Border>

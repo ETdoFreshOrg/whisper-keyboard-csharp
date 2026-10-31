@@ -7,9 +7,12 @@ namespace WhisperKeyboard.Core;
 public interface ITextTyper
 {
     /// <summary>
-    /// Type or paste the given text.
+    /// Type or paste the given text. pushToTalk is null for hands-free dictation,
+    /// where exit words ("over") and AutoEnter decide whether Enter is pressed.
+    /// For push-to-talk only the key decides (Submit presses Enter, TypeOnly
+    /// doesn't) and exit words are left in the text as spoken.
     /// </summary>
-    Task TypeTextAsync(string text);
+    Task TypeTextAsync(string text, PushToTalkMode? pushToTalk = null);
 
     /// <summary>
     /// Send backspace key(s).

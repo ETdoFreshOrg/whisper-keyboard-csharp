@@ -19,8 +19,10 @@ public class TextProcessor
     /// Process transcribed text according to configuration.
     /// </summary>
     /// <param name="text">Raw transcribed text</param>
+    /// <param name="detectExitWords">False to leave a trailing exit word in the text
+    /// (push-to-talk, where the key decides whether Enter is pressed)</param>
     /// <returns>Tuple of (processed text, whether Enter should be pressed)</returns>
-    public (string text, bool shouldEnter) ProcessText(string text)
+    public (string text, bool shouldEnter) ProcessText(string text, bool detectExitWords = true)
     {
         // Clean whitespace
         text = text.Trim();
@@ -28,7 +30,7 @@ public class TextProcessor
 
         // Check for exit word at end
         bool shouldEnter = false;
-        if (_config.ExitWordsEnabled && _config.ExitWords.Count > 0)
+        if (detectExitWords && _config.ExitWordsEnabled && _config.ExitWords.Count > 0)
         {
             // Get the last word (handle potential trailing punctuation)
             var words = text.Split(' ');

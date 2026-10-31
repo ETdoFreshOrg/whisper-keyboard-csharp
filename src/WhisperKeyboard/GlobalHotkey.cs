@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
+using WhisperKeyboard.Core;
 
 namespace WhisperKeyboard;
 
@@ -799,17 +800,55 @@ internal class MacOSGlobalHotkey : IGlobalHotkeyImpl
 }
 
 /// <summary>
-/// Interface for platform-specific push-to-talk hooks.
+/// Interface for platform-specific push-to-talk hooks. A hook watches two key
+/// chords (submit and type-only, either may be off); see PushToTalkChordTracker.
+/// Events are raised on the UI thread.
 /// </summary>
 public interface IPushToTalkHook : IDisposable
 {
-    event Action? Started;
+    /// <summary>A chord went down; the argument is the mode so far.</summary>
+    event Action<PushToTalkMode>? Started;
+    /// <summary>The type-only chord became held mid-press.</summary>
+    event Action<PushToTalkMode>? ModeChanged;
+    /// <summary>Neither chord is held any more.</summary>
     event Action? Stopped;
 }
 
+internal static class PushToTalkHookEvents
+{
+    /// <summary>Posts a tracker change to the UI thread as the matching hook event.</summary>
+    public static void Raise(PushToTalkChordTracker.Change change, PushToTalkMode mode,
+        Action<PushToTalkMode>? started, Action<PushToTalkMode>? modeChanged, Action? stopped)
+    {
+        Action? raise = change switch
+        {
+            PushToTalkChordTracker.Change.Started => started == null ? null : () => started(mode),
+            PushToTalkChordTracker.Change.ModeChanged => modeChanged == null ? null : () => modeChanged(mode),
+            PushToTalkChordTracker.Change.Stopped => stopped,
+            _ => null
+        };
+        if (raise == null) return;
+
+        Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+        {
+            try { raise(); }
+            catch (Exception ex) { Console.WriteLine($"PTT {change} callback error: {ex.Message}"); }
+        });
+    }
+
+    public static string Label(string? submitKeys, string? typeOnlyKeys) =>
+        $"submit: {Describe(submitKeys)}, no Enter: {Describe(typeOnlyKeys)}";
+
+    private static string Describe(string? keys)
+    {
+        var normalized = PushToTalkKeySpec.Normalize(keys);
+        return normalized == "" ? "off" : normalized;
+    }
+}
+
 /// <summary>
-/// Push-to-Talk hook using WH_KEYBOARD_LL to detect Right Ctrl + Right Shift hold/release.
-/// Windows-only. Fires Started when both keys are held, Stopped when either is released.
+/// Push-to-Talk hook using WH_KEYBOARD_LL to detect the push-to-talk chords' hold/release.
+/// Windows-only.
 /// </summary>
 public class PushToTalkHook : IPushToTalkHook
 {
@@ -883,48 +922,50 @@ public class PushToTalkHook : IPushToTalkHook
 
     /// <summary>
     /// Parse a "+"-joined push-to-talk key spec into the set of Windows virtual key
-    /// codes that must all be held. Falls back to Right Ctrl + Right Shift.
+    /// codes that must all be held. Empty when the spec is empty (chord off).
     /// (Fn has no Windows virtual key code and is ignored here.)
     /// </summary>
     private static uint[] ParseVks(string? keys)
     {
         var vks = new List<uint>();
-        foreach (var raw in (keys ?? "").Split('+', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        foreach (var key in PushToTalkKeySpec.Parse(keys))
         {
-            switch (raw.ToLowerInvariant())
+            switch (key)
             {
-                case "leftcontrol": case "leftctrl": case "lctrl": vks.Add(VK_LCONTROL); break;
-                case "rightcontrol": case "rightctrl": case "rctrl": vks.Add(VK_RCONTROL); break;
-                case "leftshift": case "lshift": vks.Add(VK_LSHIFT); break;
-                case "rightshift": case "rshift": vks.Add(VK_RSHIFT); break;
-                case "leftoption": case "leftalt": case "lalt": case "loption": vks.Add(VK_LMENU); break;
-                case "rightoption": case "rightalt": case "ralt": case "roption": vks.Add(VK_RMENU); break;
-                case "leftcommand": case "leftcmd": case "lcmd": case "leftwin": vks.Add(VK_LWIN); break;
-                case "rightcommand": case "rightcmd": case "rcmd": case "rightwin": vks.Add(VK_RWIN); break;
+                case "LeftControl": vks.Add(VK_LCONTROL); break;
+                case "RightControl": vks.Add(VK_RCONTROL); break;
+                case "LeftShift": vks.Add(VK_LSHIFT); break;
+                case "RightShift": vks.Add(VK_RSHIFT); break;
+                case "LeftOption": vks.Add(VK_LMENU); break;
+                case "RightOption": vks.Add(VK_RMENU); break;
+                case "LeftCommand": vks.Add(VK_LWIN); break;
+                case "RightCommand": vks.Add(VK_RWIN); break;
             }
         }
-        if (vks.Count == 0) { vks.Add(VK_RCONTROL); vks.Add(VK_RSHIFT); }
         return vks.ToArray();
     }
 
     private IntPtr _hookId = IntPtr.Zero;
     private LowLevelKeyboardProc? _proc;
-    private readonly uint[] _requiredVks;
+    private readonly uint[] _submitVks;
+    private readonly uint[] _typeOnlyVks;
     private readonly HashSet<uint> _pressed = new();
     private readonly string _keysLabel;
-    private bool _isActive;
+    private readonly PushToTalkChordTracker _tracker = new();
     private bool _disposed;
     private Thread? _hookThread;
     private uint _hookThreadId;
     private readonly ManualResetEventSlim _hookReady = new(false);
 
-    public event Action? Started;
+    public event Action<PushToTalkMode>? Started;
+    public event Action<PushToTalkMode>? ModeChanged;
     public event Action? Stopped;
 
-    public PushToTalkHook(string? keys = null)
+    public PushToTalkHook(string? submitKeys, string? typeOnlyKeys)
     {
-        _requiredVks = ParseVks(keys);
-        _keysLabel = string.IsNullOrWhiteSpace(keys) ? "RightControl+RightShift" : keys!.Trim();
+        _submitVks = ParseVks(submitKeys);
+        _typeOnlyVks = ParseVks(typeOnlyKeys);
+        _keysLabel = PushToTalkHookEvents.Label(submitKeys, typeOnlyKeys);
 
         if (!OperatingSystem.IsWindows())
         {
@@ -990,37 +1031,20 @@ public class PushToTalkHook : IPushToTalkHook
             bool isDown = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
             bool isUp = msg == WM_KEYUP || msg == WM_SYSKEYUP;
 
-            if (Array.IndexOf(_requiredVks, hookStruct.vkCode) >= 0)
+            if (Array.IndexOf(_submitVks, hookStruct.vkCode) >= 0 || Array.IndexOf(_typeOnlyVks, hookStruct.vkCode) >= 0)
             {
                 if (isDown) _pressed.Add(hookStruct.vkCode);
                 else if (isUp) _pressed.Remove(hookStruct.vkCode);
             }
 
-            bool bothDown = _requiredVks.Length > 0 && _pressed.Count >= _requiredVks.Length
-                            && Array.TrueForAll(_requiredVks, _pressed.Contains);
-
-            if (bothDown && !_isActive)
-            {
-                _isActive = true;
-                Avalonia.Threading.Dispatcher.UIThread.Post(() =>
-                {
-                    try { Started?.Invoke(); }
-                    catch (Exception ex) { Console.WriteLine($"PTT Started callback error: {ex.Message}"); }
-                });
-            }
-            else if (!bothDown && _isActive)
-            {
-                _isActive = false;
-                Avalonia.Threading.Dispatcher.UIThread.Post(() =>
-                {
-                    try { Stopped?.Invoke(); }
-                    catch (Exception ex) { Console.WriteLine($"PTT Stopped callback error: {ex.Message}"); }
-                });
-            }
+            var change = _tracker.Update(AllPressed(_submitVks), AllPressed(_typeOnlyVks));
+            PushToTalkHookEvents.Raise(change, _tracker.Mode, Started, ModeChanged, Stopped);
         }
 
         return CallNextHookEx(_hookId, nCode, wParam, lParam);
     }
+
+    private bool AllPressed(uint[] vks) => vks.Length > 0 && Array.TrueForAll(vks, _pressed.Contains);
 
     public void Dispose()
     {
@@ -1044,7 +1068,7 @@ public class PushToTalkHook : IPushToTalkHook
 }
 
 /// <summary>
-/// Push-to-Talk hook for macOS using CGEventTap to detect Right Ctrl + Right Shift hold/release.
+/// Push-to-Talk hook for macOS using CGEventTap to detect the push-to-talk chords' hold/release.
 /// Monitors kCGEventFlagsChanged events to track modifier key state.
 /// Requires Input Monitoring permission (System Settings > Privacy & Security > Input Monitoring).
 /// </summary>
@@ -1122,30 +1146,25 @@ public class PushToTalkHookMacOS : IPushToTalkHook
     /// <summary>
     /// Parse a "+"-joined push-to-talk key spec (e.g. "RightOption+RightShift", "Fn")
     /// into the set of device-dependent flag masks that must all be present.
-    /// Falls back to Right Option + Right Shift when the spec is empty/unparseable.
+    /// Empty when the spec is empty (chord off).
     /// </summary>
     private static ulong[] ParseMasks(string? keys)
     {
         var masks = new List<ulong>();
-        foreach (var raw in (keys ?? "").Split('+', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        foreach (var key in PushToTalkKeySpec.Parse(keys))
         {
-            switch (raw.ToLowerInvariant())
+            switch (key)
             {
-                case "leftcontrol": case "leftctrl": case "lctrl": masks.Add(NX_DEVICELCTLKEYMASK); break;
-                case "rightcontrol": case "rightctrl": case "rctrl": masks.Add(NX_DEVICERCTLKEYMASK); break;
-                case "leftshift": case "lshift": masks.Add(NX_DEVICELSHIFTKEYMASK); break;
-                case "rightshift": case "rshift": masks.Add(NX_DEVICERSHIFTKEYMASK); break;
-                case "leftoption": case "leftalt": case "lalt": case "loption": masks.Add(NX_DEVICELALTKEYMASK); break;
-                case "rightoption": case "rightalt": case "ralt": case "roption": masks.Add(NX_DEVICERALTKEYMASK); break;
-                case "leftcommand": case "leftcmd": case "lcmd": masks.Add(NX_DEVICELCMDKEYMASK); break;
-                case "rightcommand": case "rightcmd": case "rcmd": masks.Add(NX_DEVICERCMDKEYMASK); break;
-                case "fn": masks.Add(NX_SECONDARYFNMASK); break;
+                case "LeftControl": masks.Add(NX_DEVICELCTLKEYMASK); break;
+                case "RightControl": masks.Add(NX_DEVICERCTLKEYMASK); break;
+                case "LeftShift": masks.Add(NX_DEVICELSHIFTKEYMASK); break;
+                case "RightShift": masks.Add(NX_DEVICERSHIFTKEYMASK); break;
+                case "LeftOption": masks.Add(NX_DEVICELALTKEYMASK); break;
+                case "RightOption": masks.Add(NX_DEVICERALTKEYMASK); break;
+                case "LeftCommand": masks.Add(NX_DEVICELCMDKEYMASK); break;
+                case "RightCommand": masks.Add(NX_DEVICERCMDKEYMASK); break;
+                case "Fn": masks.Add(NX_SECONDARYFNMASK); break;
             }
-        }
-        if (masks.Count == 0)
-        {
-            masks.Add(NX_DEVICERALTKEYMASK);
-            masks.Add(NX_DEVICERSHIFTKEYMASK);
         }
         return masks.ToArray();
     }
@@ -1165,19 +1184,22 @@ public class PushToTalkHookMacOS : IPushToTalkHook
     private readonly ManualResetEventSlim _hookReady = new(false);
 
     // Activation state
-    private bool _isActive;
+    private readonly PushToTalkChordTracker _tracker = new();
 
-    // Device-dependent masks that must ALL be present in the event flags to activate.
-    private readonly ulong[] _requiredMasks;
+    // Device-dependent masks that must ALL be present in the event flags for each chord.
+    private readonly ulong[] _submitMasks;
+    private readonly ulong[] _typeOnlyMasks;
     private readonly string _keysLabel;
 
-    public event Action? Started;
+    public event Action<PushToTalkMode>? Started;
+    public event Action<PushToTalkMode>? ModeChanged;
     public event Action? Stopped;
 
-    public PushToTalkHookMacOS(string? keys = null)
+    public PushToTalkHookMacOS(string? submitKeys, string? typeOnlyKeys)
     {
-        _requiredMasks = ParseMasks(keys);
-        _keysLabel = string.IsNullOrWhiteSpace(keys) ? "RightOption+RightShift" : keys!.Trim();
+        _submitMasks = ParseMasks(submitKeys);
+        _typeOnlyMasks = ParseMasks(typeOnlyKeys);
+        _keysLabel = PushToTalkHookEvents.Label(submitKeys, typeOnlyKeys);
 
         if (!OperatingSystem.IsMacOS())
         {
@@ -1327,33 +1349,14 @@ public class PushToTalkHookMacOS : IPushToTalkHook
         // tracking state via keyCode, which macOS doesn't always report
         // correctly for modifier key releases.
         ulong flags = CGEventGetFlags(eventRef);
-        bool bothDown = true;
-        foreach (var mask in _requiredMasks)
-        {
-            if ((flags & mask) == 0) { bothDown = false; break; }
-        }
-
-        if (bothDown && !_isActive)
-        {
-            _isActive = true;
-            Avalonia.Threading.Dispatcher.UIThread.Post(() =>
-            {
-                try { Started?.Invoke(); }
-                catch (Exception ex) { Console.WriteLine($"PTT Started callback error: {ex.Message}"); }
-            });
-        }
-        else if (!bothDown && _isActive)
-        {
-            _isActive = false;
-            Avalonia.Threading.Dispatcher.UIThread.Post(() =>
-            {
-                try { Stopped?.Invoke(); }
-                catch (Exception ex) { Console.WriteLine($"PTT Stopped callback error: {ex.Message}"); }
-            });
-        }
+        var change = _tracker.Update(AllPresent(flags, _submitMasks), AllPresent(flags, _typeOnlyMasks));
+        PushToTalkHookEvents.Raise(change, _tracker.Mode, Started, ModeChanged, Stopped);
 
         return eventRef;
     }
+
+    private static bool AllPresent(ulong flags, ulong[] masks) =>
+        masks.Length > 0 && Array.TrueForAll(masks, mask => (flags & mask) != 0);
 
     public void Dispose()
     {

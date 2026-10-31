@@ -32,9 +32,10 @@ public static class OpenALNative
     public static string? LoadError { get; private set; }
 
     // Function delegates
-    private delegate IntPtr AlcOpenDeviceDelegate(string? devicename);
+    // openal-soft device names are UTF-8 on every platform (e.g. "Name’s AirPods").
+    private delegate IntPtr AlcOpenDeviceDelegate([MarshalAs(UnmanagedType.LPUTF8Str)] string? devicename);
     private delegate bool AlcCloseDeviceDelegate(IntPtr device);
-    private delegate IntPtr AlcCaptureOpenDeviceDelegate(string? devicename, int frequency, int format, int buffersize);
+    private delegate IntPtr AlcCaptureOpenDeviceDelegate([MarshalAs(UnmanagedType.LPUTF8Str)] string? devicename, int frequency, int format, int buffersize);
     private delegate bool AlcCaptureCloseDeviceDelegate(IntPtr device);
     private delegate void AlcCaptureStartDelegate(IntPtr device);
     private delegate void AlcCaptureStopDelegate(IntPtr device);
@@ -53,8 +54,13 @@ public static class OpenALNative
     private static AlcGetIntegervDelegate? _alcGetIntegerv;
     private static AlcGetStringDelegate? _alcGetString;
 
+    // alcGetString(NULL, ...) returns pointers into strings that the next
+    // enumeration overwrites, so enumerate-and-copy must not interleave across threads.
+    private static readonly object _enumerationLock = new();
+
     // OpenAL constants
     public const int ALC_CAPTURE_DEVICE_SPECIFIER = 0x310;
+    public const int ALC_CAPTURE_DEFAULT_DEVICE_SPECIFIER = 0x311;
     public const int ALC_CAPTURE_SAMPLES = 0x312;
     public const int AL_FORMAT_MONO16 = 0x1101;
 
@@ -191,22 +197,55 @@ public static class OpenALNative
         if (!IsAvailable || _alcGetString == null)
             return devices;
 
-        var ptr = _alcGetString(IntPtr.Zero, ALC_CAPTURE_DEVICE_SPECIFIER);
-
-        if (ptr == IntPtr.Zero)
-            return devices;
-
-        // The string is a null-separated list terminated by double-null
-        while (true)
+        lock (_enumerationLock)
         {
-            var str = Marshal.PtrToStringAnsi(ptr);
-            if (string.IsNullOrEmpty(str))
-                break;
+            var ptr = _alcGetString(IntPtr.Zero, ALC_CAPTURE_DEVICE_SPECIFIER);
 
-            devices.Add(str);
-            ptr = IntPtr.Add(ptr, str.Length + 1);
+            if (ptr == IntPtr.Zero)
+                return devices;
+
+            // The string is a null-separated list terminated by double-null. Step by
+            // UTF-8 byte length, not character count, or names with non-ASCII
+            // characters throw every following entry out of alignment.
+            while (true)
+            {
+                int length = Utf8Length(ptr);
+                if (length == 0)
+                    break;
+
+                devices.Add(Marshal.PtrToStringUTF8(ptr, length));
+                ptr = IntPtr.Add(ptr, length + 1);
+            }
         }
 
         return devices;
+    }
+
+    /// <summary>
+    /// Name of the current system default capture device, or null if there is none.
+    /// openal-soft caches the default until the capture list is re-enumerated, so this
+    /// re-probes first (~1ms on macOS) to see changes made since the last call.
+    /// </summary>
+    public static string? GetDefaultCaptureDeviceName()
+    {
+        if (!IsAvailable || _alcGetString == null)
+            return null;
+
+        lock (_enumerationLock)
+        {
+            _alcGetString(IntPtr.Zero, ALC_CAPTURE_DEVICE_SPECIFIER);
+            var ptr = _alcGetString(IntPtr.Zero, ALC_CAPTURE_DEFAULT_DEVICE_SPECIFIER);
+            var name = ptr == IntPtr.Zero ? null : Marshal.PtrToStringUTF8(ptr);
+            return string.IsNullOrEmpty(name) ? null : name;
+        }
+    }
+
+    /// <summary>Byte length of the null-terminated string at ptr.</summary>
+    private static int Utf8Length(IntPtr ptr)
+    {
+        int length = 0;
+        while (Marshal.ReadByte(ptr, length) != 0)
+            length++;
+        return length;
     }
 }

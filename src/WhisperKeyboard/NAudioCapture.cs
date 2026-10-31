@@ -1,3 +1,4 @@
+using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using System.Collections.Concurrent;
 using WhisperKeyboard.Core;
@@ -6,8 +7,22 @@ namespace WhisperKeyboard;
 
 public class NAudioCapture : IAudioCapture
 {
+    // How often to check whether the open mic is still the one it should be
+    // (system default changed, a different mic picked in Settings, mic unplugged).
+    private static readonly TimeSpan DeviceCheckInterval = TimeSpan.FromSeconds(1);
+    // WinMM's WAVE_MAPPER: the system default device, resolved when the device opens.
+    private const int WaveMapper = -1;
+
     private readonly Config _config;
     private WaveInEvent? _waveIn;
+    // Guards _waveIn: the device check may swap it out while other threads
+    // start/pause/resume it.
+    private readonly object _deviceLock = new();
+    private Timer? _deviceCheckTimer;
+    // What is open: the configured mic's name, or "default:<endpoint id>".
+    private string? _openedDeviceKey;
+    private string? _openedDeviceLabel;
+    private string? _lastReopenFailure;
     private readonly List<byte[]> _audioBuffer = new();
     private readonly List<byte[]> _voiceBuffer = new();
     private readonly object _bufferLock = new();
@@ -51,26 +66,148 @@ public class NAudioCapture : IAudioCapture
 
     private void StartDevice()
     {
-        _waveIn = new WaveInEvent
+        lock (_deviceLock)
         {
-            DeviceNumber = _config.DeviceIndex >= 0 ? _config.DeviceIndex : 0,
-            WaveFormat = new WaveFormat(_config.SampleRate, 16, _config.Channels),
-            BufferMilliseconds = 50
-        };
+            // A previous device may still be around from an earlier Stop.
+            _waveIn?.Dispose();
 
-        _waveIn.DataAvailable += OnDataAvailable;
-        _waveIn.RecordingStopped += OnRecordingStopped;
+            var device = ResolveDevice();
+            _waveIn = CreateWaveIn(device.Number);
+            _waveIn.StartRecording();
+            _openedDeviceKey = device.Key;
+            _openedDeviceLabel = device.Label;
+            _isRecording = true;
+            IsPaused = false;
+        }
 
-        _waveIn.StartRecording();
-        _isRecording = true;
-        IsPaused = false;
+        _deviceCheckTimer ??= new Timer(CheckDevice);
+        _deviceCheckTimer.Change(DeviceCheckInterval, Timeout.InfiniteTimeSpan);
+        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Audio capture started (device: {_openedDeviceLabel})");
     }
 
     private void StopDevice()
     {
-        _isRecording = false;
-        _isMonitoring = false;
-        _waveIn?.StopRecording();
+        _deviceCheckTimer?.Change(Timeout.Infinite, Timeout.Infinite);
+        lock (_deviceLock)
+        {
+            _isRecording = false;
+            _isMonitoring = false;
+            _waveIn?.StopRecording();
+        }
+    }
+
+    private WaveInEvent CreateWaveIn(int deviceNumber)
+    {
+        var waveIn = new WaveInEvent
+        {
+            DeviceNumber = deviceNumber,
+            WaveFormat = new WaveFormat(_config.SampleRate, 16, _config.Channels),
+            BufferMilliseconds = 50
+        };
+
+        waveIn.DataAvailable += OnDataAvailable;
+        waveIn.RecordingStopped += OnRecordingStopped;
+        return waveIn;
+    }
+
+    /// <summary>
+    /// What to open: the configured mic when it's connected, otherwise the wave
+    /// mapper (system default). Key identifies the device so a change is noticed:
+    /// for the default it includes the current default endpoint's ID.
+    /// </summary>
+    private (int Number, string Key, string Label) ResolveDevice()
+    {
+        var name = _config.DeviceName;
+        if (!string.IsNullOrEmpty(name))
+        {
+            int index = GetAudioDevices().IndexOf(name);
+            if (index >= 0) return (index, name, name);
+        }
+
+        var (id, friendlyName) = DefaultCaptureEndpoint();
+        return (WaveMapper, $"default:{id}", $"default: {friendlyName ?? "unknown"}");
+    }
+
+    /// <summary>The system default recording device (the one WAVE_MAPPER opens).</summary>
+    private static (string? Id, string? Name) DefaultCaptureEndpoint()
+    {
+        try
+        {
+            // Created per call so it's always used on the thread that created it.
+            using var enumerator = new MMDeviceEnumerator();
+            if (!enumerator.HasDefaultAudioEndpoint(DataFlow.Capture, Role.Console))
+                return (null, null);
+            using var device = enumerator.GetDefaultAudioEndpoint(DataFlow.Capture, Role.Console);
+            return (device.ID, device.FriendlyName);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error reading default recording device: {ex.Message}");
+            return (null, null);
+        }
+    }
+
+    /// <summary>
+    /// The device stays open between recordings (pre-roll keeps it warm), and
+    /// WinMM resolves the default only when opening, so without this a Default
+    /// mic stays pinned to whatever was default when it opened. Runs on a timer.
+    /// </summary>
+    private void CheckDevice(object? state)
+    {
+        try
+        {
+            lock (_deviceLock)
+            {
+                if (!_isRecording || _waveIn == null) return;
+
+                var device = ResolveDevice();
+                if (device.Key == _openedDeviceKey) return;
+
+                // Detach the old device first so the two never feed audio at once;
+                // if the new one fails to open, reattach and retry next check.
+                var old = _waveIn;
+                old.DataAvailable -= OnDataAvailable;
+                WaveInEvent? replacement = null;
+                try
+                {
+                    replacement = CreateWaveIn(device.Number);
+                    if (!IsPaused) replacement.StartRecording();
+                }
+                catch (Exception ex)
+                {
+                    replacement?.Dispose();
+                    old.DataAvailable += OnDataAvailable;
+                    // Log once per target, not on every retry.
+                    if (_lastReopenFailure != device.Key)
+                    {
+                        _lastReopenFailure = device.Key;
+                        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Failed to switch microphone to {device.Label}; staying on {_openedDeviceLabel}: {ex.Message}");
+                    }
+                    return;
+                }
+                _lastReopenFailure = null;
+
+                old.RecordingStopped -= OnRecordingStopped;
+                old.Dispose();
+                _waveIn = replacement;
+
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Microphone switched from {_openedDeviceLabel} to {device.Label}");
+                _openedDeviceKey = device.Key;
+                _openedDeviceLabel = device.Label;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Device check error: {ex.Message}");
+        }
+        finally
+        {
+            if (_isRecording && !_disposed)
+            {
+                try { _deviceCheckTimer?.Change(DeviceCheckInterval, Timeout.InfiniteTimeSpan); }
+                catch (ObjectDisposedException) { }
+            }
+        }
     }
 
     /// <summary>
@@ -81,14 +218,17 @@ public class NAudioCapture : IAudioCapture
     private void EnsureDeviceCapturing()
     {
         if (!IsPaused) return;
-        try
+        lock (_deviceLock)
         {
-            _waveIn?.StartRecording();
-            IsPaused = false;
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error resuming audio device: {ex.Message}");
+            try
+            {
+                _waveIn?.StartRecording();
+                IsPaused = false;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error resuming audio device: {ex.Message}");
+            }
         }
     }
 
@@ -157,8 +297,11 @@ public class NAudioCapture : IAudioCapture
 
     public void Pause()
     {
-        IsPaused = true;
-        _waveIn?.StopRecording();
+        lock (_deviceLock)
+        {
+            IsPaused = true;
+            _waveIn?.StopRecording();
+        }
     }
 
     public void Resume()
@@ -171,14 +314,17 @@ public class NAudioCapture : IAudioCapture
             _lastSpeechTime = DateTime.Now;
         }
 
-        try
+        lock (_deviceLock)
         {
-            _waveIn?.StartRecording();
-            IsPaused = false;
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error resuming audio recording: {ex.Message}");
+            try
+            {
+                _waveIn?.StartRecording();
+                IsPaused = false;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error resuming audio recording: {ex.Message}");
+            }
         }
     }
 
@@ -437,7 +583,11 @@ public class NAudioCapture : IAudioCapture
         if (_disposed) return;
 
         StopDevice();
-        _waveIn?.Dispose();
         _disposed = true;
+        _deviceCheckTimer?.Dispose();
+        lock (_deviceLock)
+        {
+            _waveIn?.Dispose();
+        }
     }
 }

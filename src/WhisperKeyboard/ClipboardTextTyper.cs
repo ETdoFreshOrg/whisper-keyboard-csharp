@@ -46,21 +46,27 @@ public class ClipboardTextTyper : ITextTyper, IInsertionBackend
         Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] PasteMode={config.PasteMode}");
     }
 
-    public Task TypeTextAsync(string text) => TypeTextAsync(text, explicitRequest: false);
+    public Task TypeTextAsync(string text, PushToTalkMode? pushToTalk = null) =>
+        TypeTextAsync(text, pushToTalk, explicitRequest: false);
 
     /// <summary>
-    /// Insert the text into the focused field. <paramref name="explicitRequest"/> is true
-    /// for push-to-talk and toggle recordings: the user asked for exactly this text, so
-    /// the repeat guard against double-fired voice detection doesn't apply.
+    /// Insert the text into the focused field. <paramref name="pushToTalk"/> decides Enter
+    /// as described on <see cref="ITextTyper.TypeTextAsync"/>. <paramref name="explicitRequest"/>
+    /// is true for push-to-talk and toggle recordings: the user asked for exactly this text,
+    /// so the repeat guard against double-fired voice detection doesn't apply.
     /// </summary>
-    public async Task TypeTextAsync(string text, bool explicitRequest)
+    public async Task TypeTextAsync(string text, PushToTalkMode? pushToTalk, bool explicitRequest)
     {
         if (string.IsNullOrEmpty(text)) return;
 
-        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] TypeTextAsync called with: \"{text}\"");
+        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] TypeTextAsync called with: \"{text}\" (push-to-talk: {pushToTalk?.ToString() ?? "no"})");
 
         // Process and clean text
-        var (processedText, shouldEnter) = _textProcessor.ProcessText(text);
+        // Push-to-talk: the key alone decides about Enter, so exit words are just words.
+        var (processedText, shouldEnter) = _textProcessor.ProcessText(text, detectExitWords: pushToTalk == null);
+        bool pressEnter = pushToTalk == null
+            ? _config.AutoEnter || shouldEnter
+            : pushToTalk == PushToTalkMode.Submit;
         text = processedText;
 
         // Check for duplicate text (within 2 seconds)
@@ -105,7 +111,7 @@ public class ClipboardTextTyper : ITextTyper, IInsertionBackend
                 }
             }
 
-            if (_config.AutoEnter || shouldEnter)
+            if (pressEnter)
             {
                 await Task.Delay(50);
                 await SimulateEnterAsync();
