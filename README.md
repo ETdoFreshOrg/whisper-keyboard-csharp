@@ -132,7 +132,7 @@ Builds and runs on Apple Silicon with the .NET 8 SDK. Needs:
 - `brew install openal-soft` for microphone capture (`scripts/publish.sh` copies it into the app).
 - Xcode or the Command Line Tools (`xcode-select --install`): the build compiles the macOS speech helper with `swiftc`. Without them the build only warns and the macOS speech backend is skipped.
 
-Build the app with `scripts/publish.sh`, which writes a self-contained, ad-hoc signed `publish/WhisperKeyboard.app`. Run it from there or copy it to `/Applications`. `dotnet run` also works for development, but macOS then asks permission for your terminal, not for Whisper Keyboard.
+Build the app with `scripts/publish.sh`, which writes a self-contained, signed `publish/WhisperKeyboard.app`. Run it from there or copy it to `/Applications`. `dotnet run` also works for development, but macOS then asks permission for your terminal, not for Whisper Keyboard.
 
 On first launch a setup window lists the permissions. Grant them to **Whisper Keyboard** in System Settings → Privacy & Security:
 
@@ -143,7 +143,7 @@ On first launch a setup window lists the permissions. Grant them to **Whisper Ke
 | Microphone | Recording (asked on first use) |
 | Speech Recognition | The macOS speech fallback only (asked on first use) |
 
-The app is ad-hoc signed, so macOS treats each rebuild as a new app: after rebuilding, remove the old Whisper Keyboard entries in Accessibility and Input Monitoring and grant them again. Set `CODESIGN_IDENTITY` to a real signing identity before `scripts/publish.sh` to keep the grants across rebuilds.
+`scripts/publish.sh` signs with `CODESIGN_IDENTITY` if set, otherwise the first "Apple Development" identity in your keychain (a free Apple ID in Xcode → Settings → Accounts creates one), otherwise ad-hoc. With a real identity the grants carry over to rebuilds. Ad-hoc signing makes macOS treat each rebuild as a new app: after rebuilding, remove the old Whisper Keyboard entries in Accessibility and Input Monitoring and grant them again.
 
 ## Exit Words
 

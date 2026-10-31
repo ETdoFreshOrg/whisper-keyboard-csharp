@@ -69,11 +69,23 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     fi
 
     # Code-sign the bundle with a stable identifier so macOS TCC (Accessibility,
-    # Input Monitoring, Microphone) keys on a consistent identity. Uses ad-hoc
-    # signing by default; set CODESIGN_IDENTITY to a real/self-signed identity to
-    # make granted permissions survive across rebuilds.
-    SIGN_ID="${CODESIGN_IDENTITY:--}"
-    echo "==> Code-signing app bundle (identity: $SIGN_ID)..."
+    # Input Monitoring, Microphone) keys on a consistent identity. A real identity
+    # keeps granted permissions across rebuilds; ad-hoc makes each rebuild a new app.
+    # Uses CODESIGN_IDENTITY if set, else the first "Apple Development" identity in
+    # the keychain (by hash, in case two share a name), else ad-hoc.
+    SIGN_ID="${CODESIGN_IDENTITY:-}"
+    SIGN_NAME="$SIGN_ID"
+    if [[ -z "$SIGN_ID" ]]; then
+        DEV_ID="$(security find-identity -v -p codesigning 2>/dev/null | grep -m1 '"Apple Development: ' || true)"
+        if [[ -n "$DEV_ID" ]]; then
+            SIGN_ID="$(awk '{print $2}' <<< "$DEV_ID")"
+            SIGN_NAME="$(sed -E 's/.*"(.*)".*/\1/' <<< "$DEV_ID")"
+        else
+            SIGN_ID="-"
+            SIGN_NAME="ad-hoc"
+        fi
+    fi
+    echo "==> Code-signing app bundle (identity: $SIGN_NAME)..."
     codesign --force --deep --sign "$SIGN_ID" --identifier com.whisper-keyboard "$APP_PATH" \
         && codesign --verify --deep --strict "$APP_PATH" && echo "    signature OK" \
         || echo "    WARNING: codesign failed — permissions may need re-granting"
