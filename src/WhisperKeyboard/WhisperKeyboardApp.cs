@@ -312,6 +312,7 @@ public class WhisperKeyboardApp : IDisposable
         _transcriptionCts?.Cancel();
         _pttPostRollCts?.Cancel();
         _isPushToTalking = false;
+        _endingDiscardedRecording = false;
         UpdateCancelArmed();
 
         UpdateStatus("Stopped");
@@ -451,6 +452,10 @@ public class WhisperKeyboardApp : IDisposable
     }
 
     private bool _showingTemporaryStatus;
+    // A push-to-talk or toggle recording is being thrown away (Escape, or a too-short
+    // tap). Stopping the buffer reports "speech ended", which would otherwise swap the
+    // compact bar for the full "Listening..." bar for a moment before it hides.
+    private bool _endingDiscardedRecording;
 
     private void OnSpeechDetected(object? sender, bool isSpeaking)
     {
@@ -473,7 +478,7 @@ public class WhisperKeyboardApp : IDisposable
                     _textTyper.PrepareForInsert();
                 }
             }
-            else if (_isListening && !_isPaused && !_isTranscribing && !_showingTemporaryStatus)
+            else if (_isListening && !_isPaused && !_isTranscribing && !_showingTemporaryStatus && !_endingDiscardedRecording)
             {
                 if (_isStandby)
                 {
@@ -1138,6 +1143,7 @@ public class WhisperKeyboardApp : IDisposable
             return;
 
         _isPushToTalking = true;
+        _endingDiscardedRecording = false;
         _pushToTalkMode = mode;
         _pushToTalkStartedAt = DateTime.Now;
         _audioCapture.StartLongRecording(); // Reuse long recording buffer (captures all audio, bypasses VAD)
@@ -1200,9 +1206,8 @@ public class WhisperKeyboardApp : IDisposable
         {
             Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Push-to-Talk held {held.TotalMilliseconds:F0} ms - discarding");
             _pttPostRollCts?.Cancel();
-            _discardNextAudio = true;
-            try { _audioCapture.StopLongRecording(); }
-            finally { _discardNextAudio = false; }
+            _endingDiscardedRecording = true; // cleared by StopListening
+            DiscardLongRecording();
             UpdateCancelArmed();
             Dispatcher.UIThread.Post(StopListening);
             return;
@@ -1285,17 +1290,19 @@ public class WhisperKeyboardApp : IDisposable
         {
             _isPushToTalking = false;
             _pttPostRollCts?.Cancel();
+            _endingDiscardedRecording = true; // keep the compact bar showing "Cancelled"
             DiscardLongRecording();
             UpdateCancelArmed();
             Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Push-to-Talk cancelled (Escape) - audio discarded");
 
             UpdateStatus("Cancelled");
             _recordingIndicator.ShowPushToTalkStopped();
-            _recordingIndicator.ShowCancelled();
+            _recordingIndicator.ShowCancelled(); // same compact push-to-talk bar
             // Same exit as a finished push-to-talk, after the notice has been seen,
             // unless a new recording has started in the meantime.
             _ = Task.Delay(CancelledNoticeMs).ContinueWith(_ => Dispatcher.UIThread.Post(() =>
             {
+                _endingDiscardedRecording = false;
                 if (!_isPushToTalking && !_isLongRecording && !_isTranscribing && _lastFailedAudio == null)
                     StopListening();
             }));
@@ -1308,9 +1315,11 @@ public class WhisperKeyboardApp : IDisposable
             _longRecordingCts?.Cancel();
             _longRecordingCts?.Dispose();
             _longRecordingCts = null;
+            _endingDiscardedRecording = true;
             DiscardLongRecording();
             UpdateCancelArmed();
             Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Toggle-to-Talk cancelled (Escape) - audio discarded");
+            _ = Task.Delay(CancelledNoticeMs).ContinueWith(_ => Dispatcher.UIThread.Post(() => _endingDiscardedRecording = false));
 
             UpdateStatus("Cancelled");
             _toggleToTalkIndicator.ShowCancelled();
