@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Avalonia.Input.Platform;
 using WhisperKeyboard.Core;
+using WhisperKeyboard.Core.TextInsertion;
 
 namespace WhisperKeyboard;
 
@@ -9,19 +10,29 @@ namespace WhisperKeyboard;
 /// Cross-platform text typer using clipboard paste.
 /// Uses Avalonia's built-in clipboard support and platform-specific key simulation.
 /// </summary>
-public class ClipboardTextTyper : ITextTyper
+public class ClipboardTextTyper : ITextTyper, IInsertionBackend
 {
+    private static readonly TimeSpan ModifierReleaseTimeout = TimeSpan.FromMilliseconds(1000);
+
     private readonly Config _config;
     private readonly TextProcessor _textProcessor;
     private readonly IClipboard? _clipboard;
+    private readonly IFocusedFieldProbe? _probe;
     private string _lastTypedText = "";
     private DateTime _lastTypeTime = DateTime.MinValue;
+
+    /// <summary>The last text could not be inserted after every retry. It is left on
+    /// the clipboard; the argument is the text.</summary>
+    public event Action<string>? InsertionFailed;
 
     public ClipboardTextTyper(Config config, IClipboard? clipboard)
     {
         _config = config;
         _textProcessor = new TextProcessor(config);
         _clipboard = clipboard;
+        _probe = OperatingSystem.IsWindows() ? new WindowsFocusedFieldProbe()
+               : OperatingSystem.IsMacOS() ? new MacOSFocusedFieldProbe()
+               : null;
 
         // Log clipboard state at initialization
         if (_clipboard == null)
@@ -35,7 +46,14 @@ public class ClipboardTextTyper : ITextTyper
         Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] PasteMode={config.PasteMode}");
     }
 
-    public async Task TypeTextAsync(string text)
+    public Task TypeTextAsync(string text) => TypeTextAsync(text, explicitRequest: false);
+
+    /// <summary>
+    /// Insert the text into the focused field. <paramref name="explicitRequest"/> is true
+    /// for push-to-talk and toggle recordings: the user asked for exactly this text, so
+    /// the repeat guard against double-fired voice detection doesn't apply.
+    /// </summary>
+    public async Task TypeTextAsync(string text, bool explicitRequest)
     {
         if (string.IsNullOrEmpty(text)) return;
 
@@ -46,7 +64,7 @@ public class ClipboardTextTyper : ITextTyper
         text = processedText;
 
         // Check for duplicate text (within 2 seconds)
-        if (!string.IsNullOrEmpty(text) && text == _lastTypedText && (DateTime.Now - _lastTypeTime).TotalSeconds < 2)
+        if (!explicitRequest && !string.IsNullOrEmpty(text) && text == _lastTypedText && (DateTime.Now - _lastTypeTime).TotalSeconds < 2)
         {
             Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] SKIPPING duplicate text: \"{text}\" (last typed {(DateTime.Now - _lastTypeTime).TotalSeconds:F1}s ago)");
             return;
@@ -62,24 +80,28 @@ public class ClipboardTextTyper : ITextTyper
         {
             if (!string.IsNullOrEmpty(text))
             {
-                if (_config.PasteMode && _clipboard != null)
-                {
-                    // Paste mode: copy to clipboard and simulate Cmd+V
-                    Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Using PASTE mode (clipboard available)");
-                    await _clipboard.SetTextAsync(text);
-                    Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Text copied to clipboard: \"{text}\"");
+                bool pasteMode = _config.PasteMode && _clipboard != null;
+                Console.WriteLine(pasteMode
+                    ? $"[{DateTime.Now:HH:mm:ss}] Using PASTE mode (clipboard available)"
+                    : $"[{DateTime.Now:HH:mm:ss}] Using TYPING mode (PasteMode={_config.PasteMode}, clipboard={(_clipboard != null ? "available" : "NULL")}, delayMs={_config.TypingDelayMs}, vkSpace={_config.UseVirtualSpaceKey}, vkSpaceHoldMs={_config.VirtualSpaceHoldMs})");
 
-                    // Delay to ensure clipboard/pasteboard is fully updated
-                    await Task.Delay(200);
-
-                    // Simulate Cmd+V (paste) on macOS
-                    await SimulatePasteAsync();
-                }
-                else
+                var inserter = new VerifiedTextInserter(this, _probe, log: m => Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] {m}"))
                 {
-                    // Typing mode: simulate individual keystrokes
-                    Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Using TYPING mode (PasteMode={_config.PasteMode}, clipboard={(_clipboard != null ? "available" : "NULL")}, delayMs={_config.TypingDelayMs}, vkSpace={_config.UseVirtualSpaceKey}, vkSpaceHoldMs={_config.VirtualSpaceHoldMs})");
-                    await SimulateTypingAsync(text, _config.TypingDelayMs, _config.UseVirtualSpaceKey, _config.VirtualSpaceHoldMs);
+                    PasteMode = pasteMode,
+                    Verify = _config.VerifyTextInsertion,
+                    RetryCount = Math.Max(0, _config.InsertionRetryCount),
+                    VerifyTimeout = TimeSpan.FromMilliseconds(Math.Max(200, _config.InsertionVerifyTimeoutMs)),
+                };
+                var outcome = await inserter.InsertAsync(text);
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Insert result: {outcome.Verdict} after {outcome.Attempts.Count} attempt(s) ({string.Join(", ", outcome.Attempts)})");
+
+                if (outcome.Failed)
+                {
+                    // Leave the text where the user can paste it by hand, and don't press
+                    // Enter on a field that never got it.
+                    await TrySetClipboardAsync(text);
+                    InsertionFailed?.Invoke(text);
+                    return;
                 }
             }
 
@@ -96,6 +118,63 @@ public class ClipboardTextTyper : ITextTyper
             Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] ERROR in TypeTextAsync: {ex.Message}");
             throw;
         }
+    }
+
+    // IInsertionBackend: the keystroke side of VerifiedTextInserter.
+
+    public Task WaitForModifiersReleasedAsync()
+    {
+        if (OperatingSystem.IsWindows())
+            return WindowsInputSender.WaitForModifiersReleasedAsync(ModifierReleaseTimeout);
+        if (OperatingSystem.IsMacOS())
+            return MacOSInputSender.WaitForModifiersReleasedAsync(ModifierReleaseTimeout);
+        return Task.CompletedTask;
+    }
+
+    public async Task<bool> PasteAsync(string text)
+    {
+        if (!await TrySetClipboardAsync(text))
+            return false;
+
+        // Delay to ensure clipboard/pasteboard is fully updated
+        await Task.Delay(200);
+        await SimulatePasteAsync();
+        return true;
+    }
+
+    public Task TypeAsync(string text)
+    {
+        return SimulateTypingAsync(text, _config.TypingDelayMs, _config.UseVirtualSpaceKey, _config.VirtualSpaceHoldMs);
+    }
+
+    /// <summary>
+    /// Put the text on the clipboard and read it back. Another app (a clipboard manager,
+    /// the browser itself) can hold the clipboard open, and then the set quietly fails and
+    /// Ctrl/Cmd+V pastes whatever was there before, which in a text box may be nothing.
+    /// </summary>
+    private async Task<bool> TrySetClipboardAsync(string text)
+    {
+        if (_clipboard == null) return false;
+        for (int attempt = 1; attempt <= 3; attempt++)
+        {
+            try
+            {
+                await _clipboard.SetTextAsync(text);
+                var check = await _clipboard.GetTextAsync();
+                if (check == text)
+                {
+                    Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Text copied to clipboard ({text.Length} chars)");
+                    return true;
+                }
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Clipboard read-back didn't match (attempt {attempt})");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Clipboard set failed (attempt {attempt}): {ex.Message}");
+            }
+            await Task.Delay(100);
+        }
+        return false;
     }
 
     private static async Task SimulatePasteAsync()

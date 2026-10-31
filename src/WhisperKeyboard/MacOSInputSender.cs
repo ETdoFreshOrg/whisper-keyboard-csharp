@@ -117,6 +117,37 @@ public static class MacOSInputSender
         PostKeyStroke(kVK_V, kCGEventFlagMaskCommand);
     }
 
+    [DllImport("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")]
+    private static extern ulong CGEventSourceFlagsState(int stateID);
+
+    // Shift, Control, Option, Command (Caps Lock is left out on purpose)
+    private const ulong ModifierMask = 0x00020000 | 0x00040000 | 0x00080000 | 0x00100000;
+
+    /// <summary>
+    /// Waits until no modifier key is held (or the timeout passes). Push-to-talk stops
+    /// when either of its keys is released, so the other may still be down, and typed
+    /// characters would carry its flags.
+    /// </summary>
+    public static async Task WaitForModifiersReleasedAsync(TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        bool logged = false;
+        while ((CGEventSourceFlagsState(kCGEventSourceStateHIDSystemState) & ModifierMask) != 0)
+        {
+            if (!logged)
+            {
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] MacOSInputSender: waiting for modifier keys to be released");
+                logged = true;
+            }
+            if (DateTime.UtcNow >= deadline)
+            {
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] MacOSInputSender: modifier keys still held after {timeout.TotalMilliseconds:F0} ms - sending anyway");
+                return;
+            }
+            await Task.Delay(20);
+        }
+    }
+
     /// <summary>
     /// Simulate Return key press.
     /// </summary>
