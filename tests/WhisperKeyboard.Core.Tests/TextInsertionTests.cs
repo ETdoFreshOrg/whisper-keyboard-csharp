@@ -226,3 +226,84 @@ public class VerifiedTextInserterTests
         public Task<FieldSnapshot?> CaptureAsync() => throw new InvalidOperationException("no UIA");
     }
 }
+
+public class WebContentAccessibilityTests
+{
+    /// <summary>Records which attributes were set; the named ones are accepted.</summary>
+    private sealed class FakeApp
+    {
+        private readonly HashSet<string> _accepts;
+        public List<string> Set { get; } = new();
+        public FakeApp(params string[] accepts) { _accepts = new HashSet<string>(accepts); }
+        public bool TrySet(string attribute) { Set.Add(attribute); return _accepts.Contains(attribute); }
+    }
+
+    [Theory]
+    [InlineData("com.google.Chrome")]
+    [InlineData("com.google.Chrome.canary")]
+    [InlineData("com.google.Chrome.app.fcdhnjejchinapoocedehcdlbaefeldf")] // an installed web app
+    [InlineData("com.microsoft.edgemac.Beta")]
+    [InlineData("com.brave.Browser")]
+    [InlineData("company.thebrowser.Browser")]
+    public void Chromium_browsers_are_recognised(string bundleId)
+    {
+        Assert.True(WebContentAccessibility.IsChromiumBased(bundleId, bundlesElectron: false));
+    }
+
+    [Theory]
+    [InlineData("com.apple.Safari")]
+    [InlineData("com.apple.TextEdit")]
+    [InlineData("com.google.Chromecast")] // shares a prefix with Chrome but isn't Chrome
+    [InlineData(null)]
+    public void Other_apps_are_not_chromium(string? bundleId)
+    {
+        Assert.False(WebContentAccessibility.IsChromiumBased(bundleId, bundlesElectron: false));
+    }
+
+    [Fact]
+    public void Any_app_bundling_electron_is_chromium()
+    {
+        Assert.True(WebContentAccessibility.IsChromiumBased("com.tinyspeck.slackmacgap", bundlesElectron: true));
+    }
+
+    [Fact]
+    public void Electron_app_gets_manual_accessibility_only()
+    {
+        var app = new FakeApp(WebContentAccessibility.ManualAttribute);
+        var access = new WebContentAccessibility().Ensure(10, "com.microsoft.VSCode", true, app.TrySet);
+        Assert.Equal(WebContentAccess.Manual, access);
+        Assert.Equal(new[] { WebContentAccessibility.ManualAttribute }, app.Set);
+    }
+
+    [Fact]
+    public void Chrome_falls_back_to_enhanced_user_interface_even_though_it_reports_an_error()
+    {
+        var app = new FakeApp(); // Chrome rejects both sets, but acts on the second one
+        var access = new WebContentAccessibility().Ensure(20, "com.google.Chrome", false, app.TrySet);
+        Assert.Equal(WebContentAccess.Enhanced, access);
+        Assert.Equal(new[] { WebContentAccessibility.ManualAttribute, WebContentAccessibility.EnhancedAttribute }, app.Set);
+    }
+
+    [Fact]
+    public void Non_chromium_app_is_never_touched()
+    {
+        var app = new FakeApp(WebContentAccessibility.ManualAttribute);
+        var access = new WebContentAccessibility().Ensure(30, "com.apple.Safari", false, app.TrySet);
+        Assert.Equal(WebContentAccess.NotNeeded, access);
+        Assert.Empty(app.Set);
+    }
+
+    [Fact]
+    public void Each_app_process_is_asked_once()
+    {
+        var web = new WebContentAccessibility();
+        var app = new FakeApp();
+        web.Ensure(40, "com.google.Chrome", false, app.TrySet);
+        web.Ensure(40, "com.google.Chrome", false, app.TrySet);
+        Assert.Equal(2, app.Set.Count); // Manual + Enhanced, from the first call only
+
+        var relaunched = new FakeApp();
+        web.Ensure(41, "com.google.Chrome", false, relaunched.TrySet);
+        Assert.Equal(2, relaunched.Set.Count);
+    }
+}

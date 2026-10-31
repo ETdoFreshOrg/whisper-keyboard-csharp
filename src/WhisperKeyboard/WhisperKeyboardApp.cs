@@ -468,6 +468,7 @@ public class WhisperKeyboardApp : IDisposable
                     UpdateStatus("Recording...");
                     _recordingIndicator.ShowRecording();
                     Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Speech detected - recording started");
+                    _textTyper.PrepareForInsert();
                 }
             }
             else if (_isListening && !_isPaused && !_isTranscribing && !_showingTemporaryStatus)
@@ -1033,6 +1034,7 @@ public class WhisperKeyboardApp : IDisposable
         _longRecordingCts.CancelAfter(maxDuration);
 
         _audioCapture.StartLongRecording();
+        _textTyper.PrepareForInsert();
 
         Dispatcher.UIThread.Post(() =>
         {
@@ -1134,6 +1136,7 @@ public class WhisperKeyboardApp : IDisposable
         _pushToTalkMode = mode;
         _pushToTalkStartedAt = DateTime.Now;
         _audioCapture.StartLongRecording(); // Reuse long recording buffer (captures all audio, bypasses VAD)
+        _textTyper.PrepareForInsert();
 
         Dispatcher.UIThread.Post(() =>
         {

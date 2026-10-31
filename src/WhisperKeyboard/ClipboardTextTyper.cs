@@ -46,6 +46,13 @@ public class ClipboardTextTyper : ITextTyper, IInsertionBackend
         Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] PasteMode={config.PasteMode}");
     }
 
+    /// <summary>Called when recording starts, so the focused app is ready to be read by
+    /// the time the text is inserted (see <see cref="IFocusedFieldProbe.Prepare"/>).</summary>
+    public void PrepareForInsert()
+    {
+        if (_config.VerifyTextInsertion) _probe?.Prepare();
+    }
+
     public Task TypeTextAsync(string text, PushToTalkMode? pushToTalk = null) =>
         TypeTextAsync(text, pushToTalk, explicitRequest: false);
 

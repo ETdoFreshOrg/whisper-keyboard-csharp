@@ -7,6 +7,11 @@ public interface IFocusedFieldProbe
 {
     /// <summary>Null when no focused element can be found at all.</summary>
     Task<FieldSnapshot?> CaptureAsync();
+
+    /// <summary>Gets the focused app ready to be read, ahead of the insert. Called when
+    /// recording starts, because a Chromium app takes about two seconds to expose its
+    /// web content after being asked.</summary>
+    void Prepare() { }
 }
 
 /// <summary>The keystroke side of inserting text. Platform-specific.</summary>
