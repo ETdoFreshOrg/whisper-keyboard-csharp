@@ -233,7 +233,7 @@
                                 <ComboBox x:Name="PushToTalkKeysBox" HorizontalAlignment="Stretch"/>
                                 <TextBlock Text="Push-to-Talk without Enter (just types the text)" FontSize="12" Foreground="#888888" FontWeight="SemiBold" Margin="0,8,0,0"/>
                                 <ComboBox x:Name="PushToTalkNoEnterKeysBox" HorizontalAlignment="Stretch"/>
-                                <TextBlock Text="Hold the keys to record, release to transcribe. Exit words like &quot;over&quot; don't apply to push-to-talk: they're typed as spoken, and the keys decide whether Enter is pressed. The second set can be the first plus one more key; adding that key at any point while holding means no Enter. Modifier keys only (they don't type characters). Requires Input Monitoring permission. Changes require restart."
+                                <TextBlock Text="Hold the keys to record, release to transcribe. Exit words like &quot;over&quot; don't apply to push-to-talk: they're typed as spoken, and the keys decide whether Enter is pressed. The second set can be the first plus one more key; adding that key at any point while holding means no Enter. Press Escape while holding to cancel: nothing is typed. Modifier keys only (they don't type characters). Requires Input Monitoring permission. Changes require restart."
                                            FontSize="10" Foreground="#666666" TextWrapping="Wrap"/>
                             </StackPanel>
                         </Border>

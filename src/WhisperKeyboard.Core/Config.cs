@@ -96,11 +96,13 @@ public class Config
     // Windows: Left/Right Control/Shift/Alt/Win (Fn unsupported). Empty = off.
     // Releasing these types the text and presses Enter to submit it. Exit words
     // and AutoEnter don't apply to push-to-talk: the key alone decides about Enter.
-    public string PushToTalkKeys { get; set; } = "RightCommand+RightShift";
+    public string PushToTalkKeys { get; set; } = "RightShift+RightOption";
     // Push-to-talk that only types the text, without pressing Enter. Same format;
     // empty = off. May contain PushToTalkKeys plus an extra key: if these keys are
     // held at any point during a press, the press doesn't submit.
-    public string PushToTalkNoEnterKeys { get; set; } = "RightCommand+RightShift+RightOption";
+    public string PushToTalkNoEnterKeys { get; set; } = "RightShift+RightOption+RightCommand";
+    // Escape while either set is held (or during toggle-to-talk) cancels the
+    // recording: nothing is transcribed or typed, and the Escape is swallowed.
     // Releasing the keys sooner than this discards the clip (an accidental tap).
     public double PushToTalkMinHoldSeconds { get; set; } = 0.3;
 

@@ -116,12 +116,14 @@ A backend that isn't usable (not signed in, server unreachable, permission denie
 
 Hold the keys to record, release to transcribe (Settings → Hotkeys). There are two key sets:
 
-- **Push-to-Talk** (default Right Shift + Right Command): types the text and presses Enter to submit it.
-- **Push-to-Talk without Enter** (default Right Shift + Right Command + Right Option): only types the text.
+- **Push-to-Talk** (default Right Shift + Right Option, Right Alt on Windows): types the text and presses Enter to submit it.
+- **Push-to-Talk without Enter** (default Right Shift + Right Option + Right Command, Right Alt + Right Win on Windows): only types the text.
 
 The second set can be the first plus one more key. Recording starts as soon as the first two keys are down; if the extra key is held at any point during the press, Enter isn't pressed. Exit words don't apply to push-to-talk: "over" is typed as spoken, and only the keys decide whether Enter is pressed.
 
 Push-to-talk taps shorter than 0.3 s are discarded (`PushToTalkMinHoldSeconds`).
+
+Press **Escape** while holding the keys to cancel: the recording is thrown away, nothing is typed and Enter isn't pressed. The bar shows "Cancelled". Escape also cancels during the short post-roll after release and during toggle-to-talk. That Escape is swallowed, so it doesn't also close a dialog or fire a shortcut in the app you're in (on macOS this needs the Accessibility permission; without it Escape still cancels but the app sees it too). Release the keys and press them again to record anew. When nothing is recording, Escape works as usual.
 
 For tests, set `WHISPER_KEYBOARD_TRANSCRIBE_FIXTURE=some text` and every clip "transcribes" to that text without calling any backend. Unit tests: `dotnet test`.
 

@@ -812,6 +812,13 @@ public interface IPushToTalkHook : IDisposable
     event Action<PushToTalkMode>? ModeChanged;
     /// <summary>Neither chord is held any more.</summary>
     event Action? Stopped;
+    /// <summary>Escape was pressed while <see cref="CancelArmed"/>; the recording should be thrown away.</summary>
+    event Action? Cancelled;
+    /// <summary>
+    /// Set by the app while a recording can be cancelled (push-to-talk, its post-roll,
+    /// toggle-to-talk). Escape is only intercepted while this is true.
+    /// </summary>
+    bool CancelArmed { get; set; }
 }
 
 internal static class PushToTalkHookEvents
@@ -833,6 +840,17 @@ internal static class PushToTalkHookEvents
         {
             try { raise(); }
             catch (Exception ex) { Console.WriteLine($"PTT {change} callback error: {ex.Message}"); }
+        });
+    }
+
+    /// <summary>Posts the Cancelled event to the UI thread.</summary>
+    public static void RaiseCancelled(Action? cancelled)
+    {
+        if (cancelled == null) return;
+        Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+        {
+            try { cancelled(); }
+            catch (Exception ex) { Console.WriteLine($"PTT Cancelled callback error: {ex.Message}"); }
         });
     }
 
@@ -919,6 +937,7 @@ public class PushToTalkHook : IPushToTalkHook
     private const uint VK_RMENU = 0xA5; // Right Alt
     private const uint VK_LWIN = 0x5B;
     private const uint VK_RWIN = 0x5C;
+    private const uint VK_ESCAPE = 0x1B;
 
     /// <summary>
     /// Parse a "+"-joined push-to-talk key spec into the set of Windows virtual key
@@ -952,6 +971,8 @@ public class PushToTalkHook : IPushToTalkHook
     private readonly HashSet<uint> _pressed = new();
     private readonly string _keysLabel;
     private readonly PushToTalkChordTracker _tracker = new();
+    private readonly CancelKeyFilter _escape = new();
+    private volatile bool _cancelArmed;
     private bool _disposed;
     private Thread? _hookThread;
     private uint _hookThreadId;
@@ -960,6 +981,13 @@ public class PushToTalkHook : IPushToTalkHook
     public event Action<PushToTalkMode>? Started;
     public event Action<PushToTalkMode>? ModeChanged;
     public event Action? Stopped;
+    public event Action? Cancelled;
+
+    public bool CancelArmed
+    {
+        get => _cancelArmed;
+        set => _cancelArmed = value;
+    }
 
     public PushToTalkHook(string? submitKeys, string? typeOnlyKeys)
     {
@@ -1031,6 +1059,22 @@ public class PushToTalkHook : IPushToTalkHook
             bool isDown = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
             bool isUp = msg == WM_KEYUP || msg == WM_SYSKEYUP;
 
+            if (hookStruct.vkCode == VK_ESCAPE && (isDown || isUp))
+            {
+                var decision = isDown
+                    ? _escape.KeyDown(_cancelArmed, Environment.TickCount64)
+                    : _escape.KeyUp();
+                if (decision == CancelKeyFilter.Decision.Cancel)
+                {
+                    _tracker.Cancel(); // releasing the keys now reports nothing
+                    Console.WriteLine("Escape: cancelling recording");
+                    PushToTalkHookEvents.RaiseCancelled(Cancelled);
+                }
+                // Non-zero return swallows the key so the focused app never sees it.
+                if (decision != CancelKeyFilter.Decision.PassThrough)
+                    return (IntPtr)1;
+            }
+
             if (Array.IndexOf(_submitVks, hookStruct.vkCode) >= 0 || Array.IndexOf(_typeOnlyVks, hookStruct.vkCode) >= 0)
             {
                 if (isDown) _pressed.Add(hookStruct.vkCode);
@@ -1088,6 +1132,9 @@ public class PushToTalkHookMacOS : IPushToTalkHook
     [DllImport("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")]
     private static extern ulong CGEventGetFlags(IntPtr eventRef);
 
+    [DllImport("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")]
+    private static extern long CGEventGetIntegerValueField(IntPtr eventRef, int field);
+
     [DllImport("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool CGPreflightListenEventAccess();
@@ -1126,10 +1173,18 @@ public class PushToTalkHookMacOS : IPushToTalkHook
     // CGEventTap constants
     private const int kCGSessionEventTap = 1;
     private const int kCGHeadInsertEventTap = 0;
+    private const int kCGEventTapOptionDefault = 0;
     private const int kCGEventTapOptionListenOnly = 1;
 
     // CGEvent types
+    private const int kCGEventKeyDown = 10;
+    private const int kCGEventKeyUp = 11;
     private const int kCGEventFlagsChanged = 12;
+    private const int kCGEventTapDisabledByTimeout = unchecked((int)0xFFFFFFFE);
+    private const int kCGEventTapDisabledByUserInput = unchecked((int)0xFFFFFFFF);
+
+    private const int kCGKeyboardEventKeycode = 9;
+    private const long kVK_Escape = 53;
 
     // Device-dependent modifier flags (IOKit NX_DEVICE* masks)
     // These distinguish left vs right modifier keys directly from CGEventGetFlags.
@@ -1185,6 +1240,10 @@ public class PushToTalkHookMacOS : IPushToTalkHook
 
     // Activation state
     private readonly PushToTalkChordTracker _tracker = new();
+    private readonly CancelKeyFilter _escape = new();
+    private volatile bool _cancelArmed;
+    // False when only a listen-only tap could be made: Escape still cancels but reaches the app too.
+    private bool _canSwallow;
 
     // Device-dependent masks that must ALL be present in the event flags for each chord.
     private readonly ulong[] _submitMasks;
@@ -1194,6 +1253,13 @@ public class PushToTalkHookMacOS : IPushToTalkHook
     public event Action<PushToTalkMode>? Started;
     public event Action<PushToTalkMode>? ModeChanged;
     public event Action? Stopped;
+    public event Action? Cancelled;
+
+    public bool CancelArmed
+    {
+        get => _cancelArmed;
+        set => _cancelArmed = value;
+    }
 
     public PushToTalkHookMacOS(string? submitKeys, string? typeOnlyKeys)
     {
@@ -1235,16 +1301,32 @@ public class PushToTalkHookMacOS : IPushToTalkHook
         {
             _callbackDelegate = EventTapCallback;
 
-            // Listen for kCGEventFlagsChanged (modifier key state changes)
-            ulong eventsOfInterest = 1UL << kCGEventFlagsChanged;
+            // Modifier changes drive push-to-talk; key down/up are watched only for
+            // Escape (cancel). An active tap can swallow that Escape; it needs the
+            // Accessibility permission the app already uses for typing. Without it,
+            // fall back to listening only: Escape still cancels but also reaches the app.
+            ulong eventsOfInterest = (1UL << kCGEventFlagsChanged) | (1UL << kCGEventKeyDown) | (1UL << kCGEventKeyUp);
 
             _eventTap = CGEventTapCreate(
                 kCGSessionEventTap,
                 kCGHeadInsertEventTap,
-                kCGEventTapOptionListenOnly,
+                kCGEventTapOptionDefault,
                 eventsOfInterest,
                 _callbackDelegate,
                 IntPtr.Zero);
+            _canSwallow = _eventTap != IntPtr.Zero;
+
+            if (_eventTap == IntPtr.Zero)
+            {
+                Console.WriteLine("PTT: couldn't make an active event tap (Accessibility?); Escape will cancel but not be swallowed");
+                _eventTap = CGEventTapCreate(
+                    kCGSessionEventTap,
+                    kCGHeadInsertEventTap,
+                    kCGEventTapOptionListenOnly,
+                    eventsOfInterest,
+                    _callbackDelegate,
+                    IntPtr.Zero);
+            }
 
             if (_eventTap == IntPtr.Zero)
             {
@@ -1334,7 +1416,7 @@ public class PushToTalkHookMacOS : IPushToTalkHook
         if (_disposed) return eventRef;
 
         // Handle event tap disabled by timeout — re-enable it
-        if (type != kCGEventFlagsChanged)
+        if (type == kCGEventTapDisabledByTimeout || type == kCGEventTapDisabledByUserInput)
         {
             if (_eventTap != IntPtr.Zero)
             {
@@ -1343,6 +1425,27 @@ public class PushToTalkHookMacOS : IPushToTalkHook
             }
             return eventRef;
         }
+
+        if (type == kCGEventKeyDown || type == kCGEventKeyUp)
+        {
+            if (CGEventGetIntegerValueField(eventRef, kCGKeyboardEventKeycode) != kVK_Escape)
+                return eventRef;
+
+            var decision = type == kCGEventKeyDown
+                ? _escape.KeyDown(_cancelArmed, Environment.TickCount64)
+                : _escape.KeyUp();
+            if (decision == CancelKeyFilter.Decision.Cancel)
+            {
+                _tracker.Cancel(); // releasing the keys now reports nothing
+                Console.WriteLine("Escape: cancelling recording");
+                PushToTalkHookEvents.RaiseCancelled(Cancelled);
+            }
+            // Returning null drops the event, so the focused app never sees this Escape.
+            return decision != CancelKeyFilter.Decision.PassThrough && _canSwallow ? IntPtr.Zero : eventRef;
+        }
+
+        if (type != kCGEventFlagsChanged)
+            return eventRef;
 
         // Use device-dependent flag masks (NX_DEVICE*) to directly read
         // right-side modifier state from flags. This is more reliable than

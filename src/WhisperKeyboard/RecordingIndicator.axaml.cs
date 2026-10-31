@@ -683,6 +683,36 @@ public partial class RecordingIndicator : Window
         }
     }
 
+    private const string CancelledMessage = "Cancelled";
+
+    /// <summary>
+    /// Brief "Cancelled" notice after Escape threw a recording away.
+    /// With <paramref name="returnToListening"/>, the bar goes back to Listening
+    /// afterwards; otherwise the caller hides it (push-to-talk).
+    /// </summary>
+    public async void ShowCancelled(bool returnToListening = false)
+    {
+        _isRecording = false;
+        _isLongRecording = false;
+        StatusText.Text = CancelledMessage;
+        StatusText.Foreground = new SolidColorBrush(Color.FromRgb(180, 180, 180)); // Grey
+        TimerText.IsVisible = false;
+        Opacity = ActiveOpacity;
+        _targetOpacity = ActiveOpacity;
+        PinButton.IsVisible = false;
+
+        _recordingTimer.Stop();
+
+        if (!IsVisible) ShowWithoutActivation();
+
+        if (!returnToListening) return;
+        await Task.Delay(800);
+        if (StatusText.Text == CancelledMessage)
+        {
+            ShowListening();
+        }
+    }
+
     public async void ShowLowConfidence()
     {
         _isRecording = false;

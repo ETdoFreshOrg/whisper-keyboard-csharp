@@ -99,6 +99,18 @@ public partial class ToggleToTalkIndicator : Window
         }
     }
 
+    /// <summary>Escape threw the recording away: say so briefly, then settle as stopped.</summary>
+    public async void ShowCancelled()
+    {
+        _isRecording = false;
+        _timerTick.Stop();
+        StartIcon.IsVisible = true;
+        StopIcon.IsVisible = false;
+        StatusText.Text = "Cancelled";
+        await System.Threading.Tasks.Task.Delay(800);
+        if (!_isRecording) ShowStopped();
+    }
+
     public void SetPinned(bool pinned)
     {
         _isPinned = pinned;

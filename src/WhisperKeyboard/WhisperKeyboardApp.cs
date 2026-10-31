@@ -136,6 +136,7 @@ public class WhisperKeyboardApp : IDisposable
                 _pushToTalkHook.Started += StartPushToTalk;
                 _pushToTalkHook.ModeChanged += OnPushToTalkModeChanged;
                 _pushToTalkHook.Stopped += StopPushToTalk;
+                _pushToTalkHook.Cancelled += CancelRecording;
             }
         }
 
@@ -311,6 +312,7 @@ public class WhisperKeyboardApp : IDisposable
         _transcriptionCts?.Cancel();
         _pttPostRollCts?.Cancel();
         _isPushToTalking = false;
+        UpdateCancelArmed();
 
         UpdateStatus("Stopped");
         UpdateMenuState();
@@ -1057,6 +1059,7 @@ public class WhisperKeyboardApp : IDisposable
             }
         });
 
+        UpdateCancelArmed();
         Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Long recording started (max: {_config.MaxLongRecordMinutes} min)");
     }
 
@@ -1083,6 +1086,7 @@ public class WhisperKeyboardApp : IDisposable
             }
         });
 
+        UpdateCancelArmed();
         Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Long recording stopped");
     }
 
@@ -1107,6 +1111,7 @@ public class WhisperKeyboardApp : IDisposable
                 UpdateStatus(PushToTalkStatus());
                 _recordingIndicator.ShowPushToTalk();
             });
+            UpdateCancelArmed();
             Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Push-to-Talk resumed during post-roll ({_pushToTalkMode})");
             return;
         }
@@ -1144,6 +1149,7 @@ public class WhisperKeyboardApp : IDisposable
             _recordingIndicator.ShowPushToTalk();
         });
 
+        UpdateCancelArmed();
         Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Push-to-Talk started ({mode})");
     }
 
@@ -1178,6 +1184,7 @@ public class WhisperKeyboardApp : IDisposable
             _recordingIndicator.ShowTranscribing();
         });
 
+        UpdateCancelArmed();
         Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Push-to-Talk pinned — staying in listening mode");
     }
 
@@ -1196,6 +1203,7 @@ public class WhisperKeyboardApp : IDisposable
             _discardNextAudio = true;
             try { _audioCapture.StopLongRecording(); }
             finally { _discardNextAudio = false; }
+            UpdateCancelArmed();
             Dispatcher.UIThread.Post(StopListening);
             return;
         }
@@ -1213,6 +1221,7 @@ public class WhisperKeyboardApp : IDisposable
         _pttPostRollCts = new CancellationTokenSource();
         var token = _pttPostRollCts.Token;
 
+        UpdateCancelArmed(); // still armed: Escape during post-roll cancels too
         Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Push-to-Talk released — capturing {postRoll.TotalSeconds:F1}s post-roll");
 
         _ = Task.Run(async () =>
@@ -1242,8 +1251,87 @@ public class WhisperKeyboardApp : IDisposable
             _recordingIndicator.ShowTranscribing();
         });
 
+        UpdateCancelArmed();
         Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Push-to-Talk stopped");
     }
+
+    /// <summary>True while push-to-talk (including its post-roll) owns the long-recording buffer.</summary>
+    private bool IsPushToTalkRecording =>
+        _isPushToTalking || (!_isLongRecording && _audioCapture.IsLongRecording
+                             && _pttPostRollCts is { IsCancellationRequested: false });
+
+    /// <summary>Tell the key hook whether Escape should cancel right now.</summary>
+    private void UpdateCancelArmed()
+    {
+        if (_pushToTalkHook != null)
+            _pushToTalkHook.CancelArmed = IsPushToTalkRecording || _isLongRecording;
+    }
+
+    /// <summary>Stop the long-recording buffer and throw its audio away.</summary>
+    private void DiscardLongRecording()
+    {
+        _discardNextAudio = true;
+        try { _audioCapture.StopLongRecording(); }
+        finally { _discardNextAudio = false; }
+    }
+
+    /// <summary>
+    /// Escape while recording: stop and discard the audio. Nothing is transcribed,
+    /// typed or submitted. The bar says "Cancelled" briefly.
+    /// </summary>
+    private void CancelRecording()
+    {
+        if (IsPushToTalkRecording)
+        {
+            _isPushToTalking = false;
+            _pttPostRollCts?.Cancel();
+            DiscardLongRecording();
+            UpdateCancelArmed();
+            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Push-to-Talk cancelled (Escape) - audio discarded");
+
+            UpdateStatus("Cancelled");
+            _recordingIndicator.ShowPushToTalkStopped();
+            _recordingIndicator.ShowCancelled();
+            // Same exit as a finished push-to-talk, after the notice has been seen,
+            // unless a new recording has started in the meantime.
+            _ = Task.Delay(CancelledNoticeMs).ContinueWith(_ => Dispatcher.UIThread.Post(() =>
+            {
+                if (!_isPushToTalking && !_isLongRecording && !_isTranscribing && _lastFailedAudio == null)
+                    StopListening();
+            }));
+            return;
+        }
+
+        if (_isLongRecording)
+        {
+            _isLongRecording = false;
+            _longRecordingCts?.Cancel();
+            _longRecordingCts?.Dispose();
+            _longRecordingCts = null;
+            DiscardLongRecording();
+            UpdateCancelArmed();
+            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Toggle-to-Talk cancelled (Escape) - audio discarded");
+
+            UpdateStatus("Cancelled");
+            _toggleToTalkIndicator.ShowCancelled();
+            if (_toggleToTalkAutoStarted)
+            {
+                // Listening was only started for this recording: stop it again.
+                _toggleToTalkAutoStarted = false;
+                StopListening();
+            }
+            else
+            {
+                _recordingIndicator.ShowLongRecordingStopped();
+                _recordingIndicator.ShowCancelled(returnToListening: true);
+            }
+            return;
+        }
+
+        UpdateCancelArmed(); // nothing to cancel any more
+    }
+
+    private const int CancelledNoticeMs = 800;
 
     public void ShowFileTranscription()
     {

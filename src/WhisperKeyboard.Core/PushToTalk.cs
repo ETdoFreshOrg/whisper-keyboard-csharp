@@ -81,10 +81,35 @@ public sealed class PushToTalkChordTracker
 
     public bool IsActive { get; private set; }
     public PushToTalkMode Mode { get; private set; }
+    /// <summary>The press in progress was cancelled; it stays silent until the keys are released.</summary>
+    public bool IsCancelled { get; private set; }
+
+    /// <summary>
+    /// Cancel the press in progress (Escape). Nothing more is reported for it: no
+    /// mode change and no Stopped when the keys come up, so nothing gets typed.
+    /// The next press after all keys are released starts fresh.
+    /// Returns false when there was no press to cancel.
+    /// </summary>
+    public bool Cancel()
+    {
+        if (!IsActive || IsCancelled) return false;
+        IsCancelled = true;
+        return true;
+    }
 
     /// <summary>Call on every key change with whether each chord is fully held.</summary>
     public Change Update(bool submitHeld, bool typeOnlyHeld)
     {
+        if (IsCancelled)
+        {
+            if (!submitHeld && !typeOnlyHeld)
+            {
+                IsActive = false;
+                IsCancelled = false;
+            }
+            return Change.None;
+        }
+
         if (!IsActive)
         {
             if (!submitHeld && !typeOnlyHeld) return Change.None;
@@ -106,5 +131,51 @@ public sealed class PushToTalkChordTracker
         }
 
         return Change.None;
+    }
+}
+
+/// <summary>
+/// Decides what happens to Escape while a recording can be cancelled. The press
+/// that cancels is swallowed, and so are its key repeats and its key-up, so the
+/// focused app never sees it (no dialog closes, no Alt+Esc / Win+Esc shortcut
+/// fires). When nothing is recording, Escape passes through untouched.
+/// </summary>
+public sealed class CancelKeyFilter
+{
+    public enum Decision { PassThrough, Cancel, Swallow }
+
+    /// <summary>
+    /// How long after the last swallowed Escape event a key-down still counts as a
+    /// repeat of the same press. Key repeats arrive every ~30-100 ms; this only
+    /// guards against a lost key-up leaving Escape swallowed for good.
+    /// </summary>
+    public const long RepeatWindowMs = 1000;
+
+    private bool _swallowing;
+    private long _lastSwallowedMs;
+
+    /// <param name="cancelArmed">A push-to-talk or toggle-to-talk recording is running.</param>
+    /// <param name="nowMs">A monotonic clock in milliseconds.</param>
+    public Decision KeyDown(bool cancelArmed, long nowMs)
+    {
+        if (_swallowing && nowMs - _lastSwallowedMs <= RepeatWindowMs)
+        {
+            _lastSwallowedMs = nowMs; // a key repeat of the press that cancelled
+            return Decision.Swallow;
+        }
+
+        _swallowing = false;
+        if (!cancelArmed) return Decision.PassThrough;
+
+        _swallowing = true;
+        _lastSwallowedMs = nowMs;
+        return Decision.Cancel;
+    }
+
+    public Decision KeyUp()
+    {
+        if (!_swallowing) return Decision.PassThrough;
+        _swallowing = false;
+        return Decision.Swallow;
     }
 }
