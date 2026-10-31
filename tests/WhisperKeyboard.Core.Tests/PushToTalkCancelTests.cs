@@ -103,6 +103,26 @@ public class PushToTalkCancelTests
     }
 
     [Fact]
+    public void No_global_hotkey_is_on_by_default()
+    {
+        // In particular no hands-free toggle: Cmd/Ctrl+Shift+R is the browser's hard
+        // reload, and a reload would start typing whatever the mic hears.
+        var config = new Config();
+        Assert.Equal("", config.ToggleRecordingHotkey);
+        Assert.Equal("", config.PauseResumeHotkey);
+        Assert.Equal("", config.OpenSettingsHotkey);
+        Assert.Equal("", config.LongRecordHotkey);
+    }
+
+    [Fact]
+    public void A_saved_config_without_hotkeys_loads_with_none()
+    {
+        var config = System.Text.Json.JsonSerializer.Deserialize<Config>("{\"PushToTalkKeys\":\"RightControl\"}")!;
+        Assert.Equal("", config.ToggleRecordingHotkey);
+        Assert.Equal("RightControl", config.PushToTalkKeys); // saved values are kept
+    }
+
+    [Fact]
     public void Default_type_only_chord_contains_the_submit_chord()
     {
         // So pressing Shift+Option starts recording right away and adding Command makes it type-only.

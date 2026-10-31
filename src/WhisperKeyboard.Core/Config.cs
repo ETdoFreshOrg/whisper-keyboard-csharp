@@ -78,7 +78,9 @@ public class Config
     public List<string> WakeWords { get; set; } = new List<string> { "start listening" };
     public List<string> PauseWords { get; set; } = new List<string> { "stop listening" };
 
-    // Hotkey Settings (empty string = disabled)
+    // Hotkey Settings (empty string = disabled). All off by default: these shortcuts
+    // aren't swallowed, so one that collides with an app shortcut (Cmd+Shift+R is
+    // Chrome's hard reload) would start hands-free typing whenever that app is used.
     public string ToggleRecordingHotkey { get; set; } = "";
     public string PauseResumeHotkey { get; set; } = "";
     public string OpenSettingsHotkey { get; set; } = "";

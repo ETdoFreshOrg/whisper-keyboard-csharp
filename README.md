@@ -43,7 +43,7 @@ dotnet run
 1. **Set your API key**: On first run, you'll be prompted to enter your OpenAI API key
    - Alternatively, set the `OPENAI_API_KEY` environment variable
 2. **Calibrate**: Run the calibration wizard to set optimal voice detection threshold
-3. **Start listening**: Press `Ctrl+Shift+R` or click "Start Listening" in the tray menu
+3. **Start listening**: Hold the push-to-talk keys, or click "Start Listening" in the tray menu
 4. **Speak**: Talk naturally - the app detects when you start and stop speaking
 5. **Text appears**: Your transcribed text is typed into the active window
 
@@ -51,9 +51,17 @@ dotnet run
 
 | Action | Shortcut |
 |--------|----------|
-| Toggle Recording | `Ctrl+Shift+R` |
-| Pause/Resume | `Ctrl+Shift+P` |
-| Quit Application | `Ctrl+Shift+Q` |
+| Push-to-talk (types, then presses Enter) | Right Shift + Right Option (Right Alt on Windows) |
+| Push-to-talk without Enter | Right Shift + Right Option + Right Command (Right Win on Windows) |
+| Cancel push-to-talk | Escape, while holding the keys |
+| Toggle Recording (hands-free) | None. Set one in Settings → Hotkeys if you want it |
+| Pause/Resume | None |
+| Open Settings | None |
+| Toggle-to-Talk | None |
+
+The hands-free toggle has no default shortcut on purpose: a common choice like
+Ctrl/Cmd+Shift+R is also the browser's hard reload, so reloading a page would start
+typing whatever the mic hears.
 
 ## Tray Icon States
 
