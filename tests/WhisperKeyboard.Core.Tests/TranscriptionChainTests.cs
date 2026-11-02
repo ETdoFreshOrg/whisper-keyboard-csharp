@@ -128,7 +128,7 @@ public class TranscriptionChainTests
     }
 
     [Fact]
-    public async Task Failed_backend_cools_down_and_goes_last()
+    public async Task Backend_failing_twice_in_a_row_cools_down_and_goes_last()
     {
         var now = new DateTime(2026, 10, 30, 12, 0, 0, DateTimeKind.Utc);
         var chatgpt = new FakeBackend("chatgpt");
@@ -136,14 +136,67 @@ public class TranscriptionChainTests
         var (chain, _) = Build(() => now, chatgpt, lan, new FakeBackend("system", "x"));
 
         await chain.TranscribeAsync(TestAudio.Clip(), CancellationToken.None);
+        await chain.TranscribeAsync(TestAudio.Clip(), CancellationToken.None);
         Assert.Equal(new[] { "lan", "system", "chatgpt" }, chain.PlannedOrder().Select(b => b.Id));
 
         // Still cooling: lan is tried first and chatgpt isn't called.
         await chain.TranscribeAsync(TestAudio.Clip(), CancellationToken.None);
-        Assert.Equal(1, chatgpt.Calls);
+        Assert.Equal(2, chatgpt.Calls);
 
         now = now.AddSeconds(121);
         Assert.Equal(new[] { "chatgpt", "lan", "system" }, chain.PlannedOrder().Select(b => b.Id));
+    }
+
+    [Fact]
+    public async Task One_failure_keeps_the_backend_first()
+    {
+        // A single network blip mustn't hand the next clips to a less accurate backend.
+        var chatgpt = new FakeBackend("chatgpt");
+        var (chain, _) = Build(chatgpt, new FakeBackend("lan", "lan text"), new FakeBackend("system", "x"));
+
+        await chain.TranscribeAsync(TestAudio.Clip(), CancellationToken.None);
+        Assert.Equal(new[] { "chatgpt", "lan", "system" }, chain.PlannedOrder().Select(b => b.Id));
+
+        chatgpt.Behaviour = _ => Task.FromResult(new TranscriptionResult { Text = "back" });
+        var result = await chain.TranscribeAsync(TestAudio.Clip(), CancellationToken.None);
+        Assert.Equal("chatgpt", result.BackendId);
+    }
+
+    [Fact]
+    public async Task Success_between_failures_resets_the_count()
+    {
+        var fails = true;
+        var chatgpt = new FakeBackend("chatgpt")
+        {
+            Behaviour = _ => fails
+                ? throw new TranscriberException("blip")
+                : Task.FromResult(new TranscriptionResult { Text = "ok" })
+        };
+        var (chain, _) = Build(chatgpt, new FakeBackend("lan", "lan text"), new FakeBackend("system", "x"));
+
+        await chain.TranscribeAsync(TestAudio.Clip(), CancellationToken.None); // fail
+        fails = false;
+        await chain.TranscribeAsync(TestAudio.Clip(), CancellationToken.None); // ok
+        fails = true;
+        await chain.TranscribeAsync(TestAudio.Clip(), CancellationToken.None); // fail: first in a row again
+
+        Assert.Equal("chatgpt", chain.PlannedOrder()[0].Id);
+    }
+
+    [Fact]
+    public async Task Network_error_reports_its_underlying_cause()
+    {
+        var chatgpt = new FakeBackend("chatgpt")
+        {
+            Behaviour = _ => throw new HttpRequestException(
+                "The SSL connection could not be established, see inner exception.",
+                new IOException("Received an unexpected EOF or 0 bytes from the transport stream."))
+        };
+        var (chain, _) = Build(chatgpt, new FakeBackend("lan", "lan text"), new FakeBackend("system", "x"));
+
+        var result = await chain.TranscribeAsync(TestAudio.Clip(), CancellationToken.None);
+
+        Assert.Contains("unexpected EOF", result.Attempts[0].Message);
     }
 
     [Fact]

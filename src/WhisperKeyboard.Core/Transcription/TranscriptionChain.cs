@@ -50,7 +50,9 @@ public sealed class AllBackendsFailedException : Exception
 /// - each backend has its own timeout under an overall budget, both stretched for long clips;
 /// - any failure (timeout, network, non-2xx, missing text) falls through to the next backend;
 /// - the first reply that carries a text field wins, even if the text is empty;
-/// - a backend that just failed cools down and is tried last until the cooldown ends;
+/// - a backend that fails twice in a row cools down and is tried last until the cooldown
+///   ends; one failure doesn't, so a single network blip doesn't hand the next clips to a
+///   less accurate backend (the ones after it usually succeed, so it would never be retried);
 /// - user cancel stops the chain at once.
 /// Setting WHISPER_KEYBOARD_TRANSCRIBE_FIXTURE returns that text without calling any backend (tests).
 /// </summary>
@@ -60,12 +62,13 @@ public sealed class TranscriptionChain
     public const string FixtureId = "fixture";
 
     private static readonly TimeSpan CheckTimeout = TimeSpan.FromSeconds(2);
+    private const int FailuresBeforeCooldown = 2;
 
     private readonly Func<TranscriptionSettings> _settings;
     private readonly Func<string> _language;
     private readonly IReadOnlyDictionary<string, ITranscriber> _backends;
     private readonly Func<DateTime> _clock;
-    private readonly Dictionary<string, DateTime> _lastFailure = new();
+    private readonly Dictionary<string, (int InARow, DateTime Last)> _failures = new();
     private readonly object _lock = new();
 
     public TranscriptionChain(
@@ -97,7 +100,8 @@ public sealed class TranscriptionChain
         lock (_lock)
         {
             bool Cooling(ITranscriber b) =>
-                _lastFailure.TryGetValue(b.Id, out var at) && now - at < cooldown;
+                _failures.TryGetValue(b.Id, out var f) &&
+                f.InARow >= FailuresBeforeCooldown && now - f.Last < cooldown;
             return enabled.Where(b => !Cooling(b)).Concat(enabled.Where(Cooling)).ToList();
         }
     }
@@ -152,7 +156,7 @@ public sealed class TranscriptionChain
             try
             {
                 var result = await backend.TranscribeAsync(recording, language, backendCts.Token);
-                lock (_lock) _lastFailure.Remove(backend.Id);
+                lock (_lock) _failures.Remove(backend.Id);
                 attempts.Add(new BackendAttempt(backend.Id, backend.DisplayName, AttemptOutcome.Succeeded, ""));
                 result.Backend = backend.DisplayName;
                 Log($"{backend.DisplayName} transcribed {result.WordCount} words");
@@ -176,11 +180,15 @@ public sealed class TranscriptionChain
                         => $"out of time ({total.TotalSeconds:0} s total)",
                     OperationCanceledException => $"timed out after {timeout.TotalSeconds:0} s",
                     TranscriberException te => te.Message,
-                    HttpRequestException he => $"network error: {he.Message}",
+                    HttpRequestException he => $"network error: {WithCause(he)}",
                     _ => ex.Message
                 };
                 Log($"{backend.DisplayName} failed: {message}");
-                lock (_lock) _lastFailure[backend.Id] = _clock();
+                lock (_lock)
+                {
+                    _failures.TryGetValue(backend.Id, out var previous);
+                    _failures[backend.Id] = (previous.InARow + 1, _clock());
+                }
                 attempts.Add(new BackendAttempt(backend.Id, backend.DisplayName, AttemptOutcome.Failed, message));
             }
         }
@@ -235,6 +243,14 @@ public sealed class TranscriptionChain
         {
             return ex.Message;
         }
+    }
+
+    /// <summary>The message plus its innermost cause, which says what actually went wrong
+    /// ("The SSL connection could not be established, see inner exception" alone doesn't).</summary>
+    private static string WithCause(Exception ex)
+    {
+        var cause = ex.GetBaseException();
+        return cause == ex ? ex.Message : $"{ex.Message} ({cause.Message})";
     }
 
     private static void Log(string message) => Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] {message}");

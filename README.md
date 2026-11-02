@@ -118,7 +118,7 @@ Each clip is sent to the backends below in order (Settings → Speech) until one
    - Windows: the built-in offline recognizer (System.Speech).
    - macOS: Apple's speech recognizer (`SFSpeechRecognizer`), run by the small `whisper-keyboard-speech` helper next to the app. It stays on the Mac when the language's on-device model is installed (English is), otherwise it uses Apple's servers. The first use asks for Speech Recognition permission, and it needs Dictation turned on (System Settings → Keyboard → Dictation).
 
-A backend that isn't usable (not signed in, server unreachable, permission denied) is skipped. Any error or timeout falls through to the next one, and a backend that just failed is tried last for the next two minutes. The bar shows which backend typed the text. If every backend fails, the clip is kept: hover the message to see why each one failed, then **Retry**, **Save audio** (writes a WAV next to `config.json` under `Recordings`), or **Discard**.
+A backend that isn't usable (not signed in, server unreachable, permission denied) is skipped. Any error or timeout falls through to the next one, and a backend that fails twice in a row is tried last for the next two minutes. A single failure doesn't demote it, so one network blip doesn't send the following clips to a less accurate backend. The bar shows which backend typed the text. If every backend fails, the clip is kept: hover the message to see why each one failed, then **Retry**, **Save audio** (writes a WAV next to `config.json` under `Recordings`), or **Discard**.
 
 ## Push-to-Talk
 
