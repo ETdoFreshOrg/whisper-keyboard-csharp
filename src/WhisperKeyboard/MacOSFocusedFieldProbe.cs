@@ -1,3 +1,4 @@
+using System.Drawing;
 using System.Runtime.InteropServices;
 using WhisperKeyboard.Core.TextInsertion;
 
@@ -7,7 +8,8 @@ namespace WhisperKeyboard;
 /// Reads the focused text field through the macOS Accessibility API (the same
 /// permission the app already needs to post keystrokes). Asks Chromium-based apps
 /// to expose their web content (see <see cref="WebContentAccessibility"/>), and never
-/// reads secure (password) fields.
+/// reads secure (password) fields or the empty keystroke field a canvas app lays over
+/// its drawing (see <see cref="CanvasTextField"/>).
 /// </summary>
 public class MacOSFocusedFieldProbe : IFocusedFieldProbe
 {
@@ -18,6 +20,11 @@ public class MacOSFocusedFieldProbe : IFocusedFieldProbe
     private const uint kCFStringEncodingUTF8 = 0x08000100;
     private const int MaxTextLength = 200_000;
     private const int ProcPidPathMax = 4096;
+    private const int kAXValueCGPointType = 1;
+    private const int kAXValueCGSizeType = 2;
+    // Parent and grandparent: the canvas is the field's sibling or its wrapper's.
+    private const int CanvasSearchLevels = 2;
+    private const int MaxChildrenChecked = 64;
     private static readonly TimeSpan Timeout = TimeSpan.FromMilliseconds(1000);
 
     [DllImport(AppServices)] private static extern IntPtr AXUIElementCreateSystemWide();
@@ -26,6 +33,8 @@ public class MacOSFocusedFieldProbe : IFocusedFieldProbe
     [DllImport(AppServices)] private static extern int AXUIElementSetAttributeValue(IntPtr element, IntPtr attribute, IntPtr value);
     [DllImport(AppServices)] private static extern int AXUIElementGetPid(IntPtr element, out int pid);
     [DllImport(AppServices)] private static extern int AXUIElementSetMessagingTimeout(IntPtr element, float timeoutInSeconds);
+    [DllImport(AppServices)] private static extern nuint AXValueGetTypeID();
+    [DllImport(AppServices)][return: MarshalAs(UnmanagedType.U1)] private static extern bool AXValueGetValue(IntPtr value, int type, out CGFloatPair pair);
 
     [DllImport(CoreFoundation)] private static extern IntPtr CFStringCreateWithCString(IntPtr alloc, string cStr, uint encoding);
     [DllImport(CoreFoundation)] private static extern nint CFStringGetLength(IntPtr str);
@@ -35,6 +44,9 @@ public class MacOSFocusedFieldProbe : IFocusedFieldProbe
     [DllImport(CoreFoundation)] private static extern nuint CFGetTypeID(IntPtr cf);
     [DllImport(CoreFoundation)] private static extern nuint CFStringGetTypeID();
     [DllImport(CoreFoundation)] private static extern void CFRelease(IntPtr cf);
+    [DllImport(CoreFoundation)] private static extern nuint CFArrayGetTypeID();
+    [DllImport(CoreFoundation)] private static extern nint CFArrayGetCount(IntPtr array);
+    [DllImport(CoreFoundation)] private static extern IntPtr CFArrayGetValueAtIndex(IntPtr array, nint index);
     [DllImport(CoreFoundation)] private static extern IntPtr CFURLCreateFromFileSystemRepresentation(IntPtr alloc, byte[] buffer, nint length, bool isDirectory);
     [DllImport(CoreFoundation)] private static extern IntPtr CFBundleCreate(IntPtr alloc, IntPtr bundleUrl);
     [DllImport(CoreFoundation)] private static extern IntPtr CFBundleGetIdentifier(IntPtr bundle);
@@ -53,6 +65,14 @@ public class MacOSFocusedFieldProbe : IFocusedFieldProbe
     {
         public nint Location;
         public nint Length;
+    }
+
+    /// <summary>A CGPoint (x, y) or a CGSize (width, height): two CGFloats.</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    private struct CGFloatPair
+    {
+        public double First;
+        public double Second;
     }
 
     private static readonly Lazy<IntPtr> SystemWide = new(() =>
@@ -109,7 +129,16 @@ public class MacOSFocusedFieldProbe : IFocusedFieldProbe
                 var owner = pid.ToString();
                 if (CopyString(element, "AXSubrole") == "AXSecureTextField")
                     return new FieldSnapshot(owner, null);
-                return new FieldSnapshot(owner, CopyString(element, "AXValue"));
+                var text = CopyString(element, "AXValue");
+                // A canvas app empties its keystroke field after every key or paste, so an
+                // empty one reads the same whether or not the text arrived. A field holding
+                // text shows what it receives, so only an empty one needs the check.
+                if (text == "" && IsOverCanvas(element))
+                {
+                    Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Insert check: focused field is an empty text box over the app's own drawing - it can't show the text");
+                    return new FieldSnapshot(owner, null);
+                }
+                return new FieldSnapshot(owner, text);
             }
             finally { CFRelease(element); }
         }
@@ -214,6 +243,68 @@ public class MacOSFocusedFieldProbe : IFocusedFieldProbe
         }
         catch { return IntPtr.Zero; }
     });
+
+    /// <summary>True when an image (a canvas shows up as one) among the children of the
+    /// field's parent or grandparent covers the field.</summary>
+    private static bool IsOverCanvas(IntPtr element)
+    {
+        if (CopyFrame(element) is not { } field) return false;
+
+        var images = new List<RectangleF>();
+        var current = element;
+        try
+        {
+            for (int level = 0; level < CanvasSearchLevels; level++)
+            {
+                if (AXUIElementCopyAttributeValue(current, Name("AXParent"), out var parent) != 0 || parent == IntPtr.Zero)
+                    break;
+                if (current != element) CFRelease(current);
+                current = parent;
+                AddImageFrames(parent, images);
+            }
+        }
+        finally
+        {
+            if (current != element) CFRelease(current);
+        }
+        return CanvasTextField.IsOverCanvas(field, images);
+    }
+
+    private static void AddImageFrames(IntPtr parent, List<RectangleF> images)
+    {
+        if (AXUIElementCopyAttributeValue(parent, Name("AXChildren"), out var children) != 0 || children == IntPtr.Zero)
+            return;
+        try
+        {
+            if (CFGetTypeID(children) != CFArrayGetTypeID()) return;
+            var count = Math.Min(CFArrayGetCount(children), MaxChildrenChecked);
+            for (nint i = 0; i < count; i++)
+            {
+                var child = CFArrayGetValueAtIndex(children, i); // Get rule: not released
+                if (CopyString(child, "AXRole") == "AXImage" && CopyFrame(child) is { } frame)
+                    images.Add(frame);
+            }
+        }
+        finally { CFRelease(children); }
+    }
+
+    /// <summary>The element's frame in screen points, or null when it doesn't have one.</summary>
+    private static RectangleF? CopyFrame(IntPtr element)
+    {
+        if (!CopyPair(element, "AXPosition", kAXValueCGPointType, out var position) ||
+            !CopyPair(element, "AXSize", kAXValueCGSizeType, out var size))
+            return null;
+        return new RectangleF((float)position.First, (float)position.Second, (float)size.First, (float)size.Second);
+    }
+
+    private static bool CopyPair(IntPtr element, string attribute, int type, out CGFloatPair pair)
+    {
+        pair = default;
+        if (AXUIElementCopyAttributeValue(element, Name(attribute), out var value) != 0 || value == IntPtr.Zero)
+            return false;
+        try { return CFGetTypeID(value) == AXValueGetTypeID() && AXValueGetValue(value, type, out pair); }
+        finally { CFRelease(value); }
+    }
 
     private static string? CopyString(IntPtr element, string attribute)
     {

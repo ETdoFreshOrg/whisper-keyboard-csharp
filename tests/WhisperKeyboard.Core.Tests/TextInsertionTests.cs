@@ -1,3 +1,4 @@
+using System.Drawing;
 using WhisperKeyboard.Core.TextInsertion;
 using Xunit;
 
@@ -305,5 +306,46 @@ public class WebContentAccessibilityTests
         var relaunched = new FakeApp();
         web.Ensure(41, "com.google.Chrome", false, relaunched.TrySet);
         Assert.Equal(2, relaunched.Set.Count);
+    }
+}
+
+public class CanvasTextFieldTests
+{
+    [Fact]
+    public void Keystroke_field_laid_over_a_canvas_app_is_over_canvas()
+    {
+        // Claude Duet's Rust/WebAssembly UI: the #keys textarea sits on the drawn composer.
+        var field = new RectangleF(2995, 363, 340, 17);
+        var canvas = new RectangleF(1554, 233, 1825, 1078);
+        Assert.True(CanvasTextField.IsOverCanvas(field, new[] { canvas }));
+    }
+
+    [Fact]
+    public void Icon_beside_a_field_is_not_a_canvas()
+    {
+        var field = new RectangleF(100, 100, 300, 30);
+        var searchIcon = new RectangleF(80, 105, 20, 20);
+        Assert.False(CanvasTextField.IsOverCanvas(field, new[] { searchIcon }));
+    }
+
+    [Fact]
+    public void Image_covering_only_part_of_the_field_is_not_a_canvas()
+    {
+        var field = new RectangleF(100, 100, 300, 30);
+        var banner = new RectangleF(0, 0, 1000, 120);
+        Assert.False(CanvasTextField.IsOverCanvas(field, new[] { banner }));
+    }
+
+    [Fact]
+    public void Image_no_bigger_than_the_field_is_not_a_canvas()
+    {
+        var field = new RectangleF(100, 100, 300, 30);
+        Assert.False(CanvasTextField.IsOverCanvas(field, new[] { field }));
+    }
+
+    [Fact]
+    public void Field_with_no_images_around_it_is_not_over_canvas()
+    {
+        Assert.False(CanvasTextField.IsOverCanvas(new RectangleF(100, 100, 300, 30), Array.Empty<RectangleF>()));
     }
 }
