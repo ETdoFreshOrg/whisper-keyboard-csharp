@@ -1,7 +1,6 @@
 using System.Runtime.InteropServices;
 using Avalonia;
 using Avalonia.Controls;
-using Avalonia.Controls.Shapes;
 using Avalonia.Input;
 using Avalonia.Media;
 using Avalonia.Threading;
@@ -62,6 +61,11 @@ public partial class RecordingIndicator : Window
         InitializeComponent();
 
         _volumeHistory = new double[MaxVolumeHistory];
+        Waveform.VerticalInset = 6;
+        Waveform.ShowCenterLine = true;
+        Waveform.BarColor = (volume, recording) => recording
+            ? Color.FromRgb(50, (byte)(120 + volume * 135), 50)
+            : Color.FromRgb(60, 90, 60);
 
         // Setup timers
         _updateTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
@@ -458,60 +462,7 @@ public partial class RecordingIndicator : Window
         }
     }
 
-    private void DrawWaveform()
-    {
-        WaveformCanvas.Children.Clear();
-
-        var width = WaveformCanvas.Bounds.Width;
-        var height = WaveformCanvas.Bounds.Height;
-        if (width <= 0 || height <= 0) return;
-
-        var barWidth = width / MaxVolumeHistory;
-        var centerY = height / 2;
-
-        for (int i = 0; i < MaxVolumeHistory; i++)
-        {
-            int idx = (_volumeIndex + i) % MaxVolumeHistory;
-            double vol = _volumeHistory[idx];
-
-            // Normalize volume (0-500 range to 0-1)
-            double normalizedVolume = Math.Min(1.0, vol / 400.0);
-            double barHeight = Math.Max(2, normalizedVolume * (height - 6));
-
-            // Color based on recording state
-            Color barColor;
-            if (_isRecording)
-            {
-                int green = (int)(120 + normalizedVolume * 135);
-                barColor = Color.FromRgb(50, (byte)green, 50);
-            }
-            else
-            {
-                barColor = Color.FromRgb(60, 90, 60);
-            }
-
-            var rect = new Rectangle
-            {
-                Width = Math.Max(1, barWidth - 1),
-                Height = barHeight,
-                Fill = new SolidColorBrush(barColor)
-            };
-
-            Canvas.SetLeft(rect, i * barWidth);
-            Canvas.SetTop(rect, centerY - barHeight / 2);
-            WaveformCanvas.Children.Add(rect);
-        }
-
-        // Draw center line
-        var centerLine = new Line
-        {
-            StartPoint = new Point(0, centerY),
-            EndPoint = new Point(width, centerY),
-            Stroke = new SolidColorBrush(Color.FromRgb(40, 40, 40)),
-            StrokeThickness = 1
-        };
-        WaveformCanvas.Children.Add(centerLine);
-    }
+    private void DrawWaveform() => Waveform.Update(_volumeHistory, _volumeIndex, _isRecording);
 
     public void UpdateVolume(double volume)
     {

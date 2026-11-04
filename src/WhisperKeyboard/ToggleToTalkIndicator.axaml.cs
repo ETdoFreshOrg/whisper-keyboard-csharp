@@ -2,7 +2,6 @@ using System;
 using System.Runtime.InteropServices;
 using Avalonia;
 using Avalonia.Controls;
-using Avalonia.Controls.Shapes;
 using Avalonia.Input;
 using Avalonia.Media;
 using Avalonia.Threading;
@@ -51,7 +50,12 @@ public partial class ToggleToTalkIndicator : Window
             _volumeIndex = (_volumeIndex + 1) % MaxVolumeHistory;
             DrawWaveform();
         };
-        _waveformTimer.Start();
+        // The timer starts and stops with the window (EnsureVisible / HideToOffScreen).
+        // It used to tick 20 times a second for the app's whole life, shown or not.
+
+        Waveform.BarColor = (volume, recording) => recording
+            ? Color.FromRgb(255, (byte)(100 + volume * 100), 100)
+            : Color.FromRgb(90, 60, 60);
 
         ToggleButton.Click += (s, e) => OnToggleClicked?.Invoke();
         PinButton.Click += (s, e) => { SetPinned(!_isPinned); OnPinClicked?.Invoke(); };
@@ -130,38 +134,7 @@ public partial class ToggleToTalkIndicator : Window
         _currentVolume = volume;
     }
 
-    private void DrawWaveform()
-    {
-        WaveformCanvas.Children.Clear();
-        var width = WaveformCanvas.Bounds.Width;
-        var height = WaveformCanvas.Bounds.Height;
-        if (width <= 0 || height <= 0) return;
-
-        var barWidth = width / MaxVolumeHistory;
-        var centerY = height / 2;
-
-        for (int i = 0; i < MaxVolumeHistory; i++)
-        {
-            int idx = (_volumeIndex + i) % MaxVolumeHistory;
-            double vol = _volumeHistory[idx];
-            double normalizedVolume = Math.Min(1.0, vol / 400.0);
-            double barHeight = Math.Max(2, normalizedVolume * (height - 4));
-
-            Color barColor = _isRecording
-                ? Color.FromRgb(255, (byte)(100 + normalizedVolume * 100), 100)
-                : Color.FromRgb(90, 60, 60);
-
-            var rect = new Rectangle
-            {
-                Width = Math.Max(1, barWidth - 1),
-                Height = barHeight,
-                Fill = new SolidColorBrush(barColor)
-            };
-            Canvas.SetLeft(rect, i * barWidth);
-            Canvas.SetTop(rect, centerY - barHeight / 2);
-            WaveformCanvas.Children.Add(rect);
-        }
-    }
+    private void DrawWaveform() => Waveform.Update(_volumeHistory, _volumeIndex, _isRecording);
 
     private void UpdateTimerText()
     {
@@ -171,6 +144,7 @@ public partial class ToggleToTalkIndicator : Window
 
     private void EnsureVisible()
     {
+        _waveformTimer.Start();
         if (!_hasBeenShown)
         {
             IntPtr prevForeground = IntPtr.Zero;
@@ -206,6 +180,7 @@ public partial class ToggleToTalkIndicator : Window
 
     private void HideToOffScreen()
     {
+        _waveformTimer.Stop();
         if (!_hasBeenShown) return;
         // Save current position (user may have dragged) then move off-screen.
         // Don't call Hide() - that would destroy the activation state.

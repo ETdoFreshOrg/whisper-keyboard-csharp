@@ -1,5 +1,6 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="using:WhisperKeyboard"
         x:Class="WhisperKeyboard.RecordingIndicator"
         Title="Recording"
         Width="500"
@@ -22,7 +23,7 @@
                     Background="#141414"
                     CornerRadius="4"
                     ClipToBounds="True">
-                <Canvas x:Name="WaveformCanvas" />
+                <local:WaveformView x:Name="Waveform" />
             </Border>
 
             <!-- Status Area -->
