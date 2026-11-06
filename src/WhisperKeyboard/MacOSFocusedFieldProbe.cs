@@ -106,9 +106,18 @@ public class MacOSFocusedFieldProbe : IFocusedFieldProbe
                 return null;
             try
             {
-                var owner = pid.ToString();
+                // The role is part of the owner: a later read that finds another
+                // kind of element (focus moved within the app) isn't compared
+                // against the first one.
+                var role = CopyString(element, "AXRole");
+                var owner = $"{pid}/{role}";
                 if (CopyString(element, "AXSubrole") == "AXSecureTextField")
                     return new FieldSnapshot(owner, null);
+                if (!TextEntryRole.IsMacTextEntry(role))
+                {
+                    Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Insert check: focus is on {role ?? "an element with no role"}, not a text box - it can't show the text");
+                    return new FieldSnapshot(owner, null);
+                }
                 return new FieldSnapshot(owner, CopyString(element, "AXValue"));
             }
             finally { CFRelease(element); }

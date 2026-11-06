@@ -307,3 +307,58 @@ public class WebContentAccessibilityTests
         Assert.Equal(2, relaunched.Set.Count);
     }
 }
+
+public class TextEntryRoleTests
+{
+    [Theory]
+    [InlineData("AXTextField")]
+    [InlineData("AXTextArea")]
+    [InlineData("AXComboBox")]
+    public void Text_boxes_are_read(string role) => Assert.True(TextEntryRole.IsMacTextEntry(role));
+
+    [Theory]
+    [InlineData("AXWebArea")]   // a page with nothing in it focused (ETbot after Tab)
+    [InlineData("AXGroup")]
+    [InlineData("AXScrollArea")]
+    [InlineData("AXButton")]
+    [InlineData("AXCheckBox")]
+    [InlineData("AXImage")]
+    [InlineData("")]
+    [InlineData(null)]
+    public void Anything_else_is_not_read(string? role) => Assert.False(TextEntryRole.IsMacTextEntry(role));
+
+    /// <summary>
+    /// ETbot on 2026-11-06: its page area had focus (value "") and its own paste
+    /// handler took the text, so the value never changed. Read as a field, that
+    /// was "NotLanded" three times: two pastes landed, the typing didn't, and the
+    /// bar said the text didn't land. Unread, it's inserted once.
+    /// </summary>
+    [Fact]
+    public async Task Focused_page_area_that_takes_the_paste_gets_it_once()
+    {
+        var page = new PageArea();
+        var inserter = new VerifiedTextInserter(page, page, delay: _ => Task.CompletedTask)
+        {
+            VerifyTimeout = TimeSpan.FromMilliseconds(300),
+            PollInterval = TimeSpan.FromMilliseconds(100),
+        };
+
+        var outcome = await inserter.InsertAsync("Hello there.");
+
+        Assert.False(outcome.Failed);
+        Assert.Equal(LandingVerdict.Unknown, outcome.Verdict);
+        Assert.Equal(new[] { InsertMethod.Paste }, outcome.Attempts);
+        Assert.Equal("Hello there.", page.Received);
+    }
+
+    /// <summary>The probe's decision: a web area's empty value is not a field's text.</summary>
+    private sealed class PageArea : IFocusedFieldProbe, IInsertionBackend
+    {
+        public string Received = "";
+        public Task<FieldSnapshot?> CaptureAsync() =>
+            Task.FromResult<FieldSnapshot?>(new FieldSnapshot("42/AXWebArea", TextEntryRole.IsMacTextEntry("AXWebArea") ? "" : null));
+        public Task WaitForModifiersReleasedAsync() => Task.CompletedTask;
+        public Task<bool> PasteAsync(string text) { Received += text; return Task.FromResult(true); }
+        public Task TypeAsync(string text) => Task.CompletedTask; // keys reach nothing there
+    }
+}
