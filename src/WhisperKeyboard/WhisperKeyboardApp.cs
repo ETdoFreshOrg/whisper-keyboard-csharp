@@ -37,7 +37,6 @@ public class WhisperKeyboardApp : IDisposable
     private PushToTalkMode _pushToTalkMode; // Submit or type-only, for the press in progress
     // Set (with its mode) when audio came from PTT, for typing and post-transcription behavior
     private PushToTalkMode? _wasPushToTalking;
-    private bool _insertionFailed; // Last transcription never reached the focused field
     private bool _wasLongRecording; // Track if audio came from long recording for transcription method
     private bool _toggleToTalkAutoStarted; // Toggle-to-Talk auto-started listening; bar stays hidden, stop listening after txn
     private DateTime _ignoreUntil = DateTime.MinValue;
@@ -88,7 +87,6 @@ public class WhisperKeyboardApp : IDisposable
         // Get clipboard from the main window (we'll create a hidden one)
         var clipboard = desktop.MainWindow?.Clipboard;
         _textTyper = new ClipboardTextTyper(_config, clipboard);
-        _textTyper.InsertionFailed += OnInsertionFailed;
 
         MigrateLegacyDeviceIndex();
 
@@ -475,7 +473,6 @@ public class WhisperKeyboardApp : IDisposable
                     UpdateStatus("Recording...");
                     _recordingIndicator.ShowRecording();
                     Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Speech detected - recording started");
-                    _textTyper.PrepareForInsert();
                 }
             }
             else if (_isListening && !_isPaused && !_isTranscribing && !_showingTemporaryStatus && !_endingDiscardedRecording)
@@ -650,8 +647,7 @@ public class WhisperKeyboardApp : IDisposable
                 if (isFromPushToTalk)
                 {
                     // PTT: stop listening and hide the toolbar after a brief delay
-                    // (longer when the text didn't land, so the notice can be read)
-                    await Task.Delay(_insertionFailed ? 3000 : 500);
+                    await Task.Delay(500);
                     Dispatcher.UIThread.Post(() =>
                     {
                         StopListening();
@@ -873,19 +869,6 @@ public class WhisperKeyboardApp : IDisposable
         return false;
     }
 
-    private void OnInsertionFailed(string text)
-    {
-        _insertionFailed = true;
-        Dispatcher.UIThread.Post(async () =>
-        {
-            _showingTemporaryStatus = true;
-            UpdateStatus("Text didn't land - it's on the clipboard");
-            _recordingIndicator.ShowInsertionFailed();
-            await Task.Delay(3000);
-            _showingTemporaryStatus = false;
-        });
-    }
-
     private void ShowLowConfidence()
     {
         Dispatcher.UIThread.Post(async () =>
@@ -970,7 +953,6 @@ public class WhisperKeyboardApp : IDisposable
             _recordingIndicator.ShowTyping(result.Backend);
         });
 
-        _insertionFailed = false;
         await _textTyper.TypeTextAsync(result.Text, pushToTalk, explicitRequest);
         _ignoreUntil = DateTime.Now.AddSeconds(2);
 
@@ -1041,7 +1023,6 @@ public class WhisperKeyboardApp : IDisposable
         _longRecordingCts.CancelAfter(maxDuration);
 
         _audioCapture.StartLongRecording();
-        _textTyper.PrepareForInsert();
 
         Dispatcher.UIThread.Post(() =>
         {
@@ -1147,7 +1128,6 @@ public class WhisperKeyboardApp : IDisposable
         _pushToTalkMode = mode;
         _pushToTalkStartedAt = DateTime.Now;
         _audioCapture.StartLongRecording(); // Reuse long recording buffer (captures all audio, bypasses VAD)
-        _textTyper.PrepareForInsert();
 
         Dispatcher.UIThread.Post(() =>
         {

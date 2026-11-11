@@ -2,7 +2,6 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Avalonia.Input.Platform;
 using WhisperKeyboard.Core;
-using WhisperKeyboard.Core.TextInsertion;
 
 namespace WhisperKeyboard;
 
@@ -10,29 +9,21 @@ namespace WhisperKeyboard;
 /// Cross-platform text typer using clipboard paste.
 /// Uses Avalonia's built-in clipboard support and platform-specific key simulation.
 /// </summary>
-public class ClipboardTextTyper : ITextTyper, IInsertionBackend
+public class ClipboardTextTyper : ITextTyper
 {
     private static readonly TimeSpan ModifierReleaseTimeout = TimeSpan.FromMilliseconds(1000);
 
     private readonly Config _config;
     private readonly TextProcessor _textProcessor;
     private readonly IClipboard? _clipboard;
-    private readonly IFocusedFieldProbe? _probe;
     private string _lastTypedText = "";
     private DateTime _lastTypeTime = DateTime.MinValue;
-
-    /// <summary>The last text could not be inserted after every retry. It is left on
-    /// the clipboard; the argument is the text.</summary>
-    public event Action<string>? InsertionFailed;
 
     public ClipboardTextTyper(Config config, IClipboard? clipboard)
     {
         _config = config;
         _textProcessor = new TextProcessor(config);
         _clipboard = clipboard;
-        _probe = OperatingSystem.IsWindows() ? new WindowsFocusedFieldProbe()
-               : OperatingSystem.IsMacOS() ? new MacOSFocusedFieldProbe()
-               : null;
 
         // Log clipboard state at initialization
         if (_clipboard == null)
@@ -44,13 +35,6 @@ public class ClipboardTextTyper : ITextTyper, IInsertionBackend
             Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Clipboard initialized successfully");
         }
         Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] PasteMode={config.PasteMode}");
-    }
-
-    /// <summary>Called when recording starts, so the focused app is ready to be read by
-    /// the time the text is inserted (see <see cref="IFocusedFieldProbe.Prepare"/>).</summary>
-    public void PrepareForInsert()
-    {
-        if (_config.VerifyTextInsertion) _probe?.Prepare();
     }
 
     public Task TypeTextAsync(string text, PushToTalkMode? pushToTalk = null) =>
@@ -98,24 +82,15 @@ public class ClipboardTextTyper : ITextTyper, IInsertionBackend
                     ? $"[{DateTime.Now:HH:mm:ss}] Using PASTE mode (clipboard available)"
                     : $"[{DateTime.Now:HH:mm:ss}] Using TYPING mode (PasteMode={_config.PasteMode}, clipboard={(_clipboard != null ? "available" : "NULL")}, delayMs={_config.TypingDelayMs}, vkSpace={_config.UseVirtualSpaceKey}, vkSpaceHoldMs={_config.VirtualSpaceHoldMs})");
 
-                var inserter = new VerifiedTextInserter(this, _probe, log: m => Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] {m}"))
+                // Sent once: the focused field isn't read back or retried.
+                await WaitForModifiersReleasedAsync();
+                if (pasteMode && !await PasteAsync(text))
                 {
-                    PasteMode = pasteMode,
-                    Verify = _config.VerifyTextInsertion,
-                    RetryCount = Math.Max(0, _config.InsertionRetryCount),
-                    VerifyTimeout = TimeSpan.FromMilliseconds(Math.Max(200, _config.InsertionVerifyTimeoutMs)),
-                };
-                var outcome = await inserter.InsertAsync(text);
-                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Insert result: {outcome.Verdict} after {outcome.Attempts.Count} attempt(s) ({string.Join(", ", outcome.Attempts)})");
-
-                if (outcome.Failed)
-                {
-                    // Leave the text where the user can paste it by hand, and don't press
-                    // Enter on a field that never got it.
-                    await TrySetClipboardAsync(text);
-                    InsertionFailed?.Invoke(text);
-                    return;
+                    Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Clipboard didn't take the text - typing it instead");
+                    pasteMode = false;
                 }
+                if (!pasteMode)
+                    await TypeAsync(text);
             }
 
             if (pressEnter)
@@ -133,9 +108,9 @@ public class ClipboardTextTyper : ITextTyper, IInsertionBackend
         }
     }
 
-    // IInsertionBackend: the keystroke side of VerifiedTextInserter.
-
-    public Task WaitForModifiersReleasedAsync()
+    /// <summary>Waits (bounded) until no modifier key is held, so Ctrl/Cmd+V or typed
+    /// characters aren't combined with still-held push-to-talk keys.</summary>
+    private static Task WaitForModifiersReleasedAsync()
     {
         if (OperatingSystem.IsWindows())
             return WindowsInputSender.WaitForModifiersReleasedAsync(ModifierReleaseTimeout);
@@ -144,7 +119,9 @@ public class ClipboardTextTyper : ITextTyper, IInsertionBackend
         return Task.CompletedTask;
     }
 
-    public async Task<bool> PasteAsync(string text)
+    /// <summary>Puts the text on the clipboard, confirms it's there, then sends paste.
+    /// Returns false (without sending paste) when the clipboard didn't take the text.</summary>
+    private async Task<bool> PasteAsync(string text)
     {
         if (!await TrySetClipboardAsync(text))
             return false;
@@ -155,7 +132,7 @@ public class ClipboardTextTyper : ITextTyper, IInsertionBackend
         return true;
     }
 
-    public Task TypeAsync(string text)
+    private Task TypeAsync(string text)
     {
         return SimulateTypingAsync(text, _config.TypingDelayMs, _config.UseVirtualSpaceKey, _config.VirtualSpaceHoldMs);
     }
