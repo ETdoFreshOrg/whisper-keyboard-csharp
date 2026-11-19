@@ -149,18 +149,40 @@ internal static partial class MacOSHelper
     private static partial void objc_msgSend_void_IntPtr(IntPtr receiver, IntPtr selector, IntPtr arg);
 
     // NSWindowCollectionBehavior flags
-    private const long NSWindowCollectionBehaviorCanJoinAllSpaces = 1 << 0; // on every desktop
-    private const long NSWindowCollectionBehaviorTransient = 1 << 3;     // not managed by Mission Control
-    private const long NSWindowCollectionBehaviorIgnoresCycle = 1 << 6;  // not in Cmd+Tab cycling
-
-    private const long NSWindowStyleMaskNonactivatingPanel = 1 << 7; // clicks don't activate the app
-    private const long NSFloatingWindowLevel = 5;
+    private const long NSWindowCollectionBehaviorCanJoinAllSpaces = 1 << 0;   // on every Space
+    private const long NSWindowCollectionBehaviorTransient = 1 << 3;          // not managed by Mission Control
+    private const long NSWindowCollectionBehaviorStationary = 1 << 4;         // stays put while Spaces slide / Exposé
+    private const long NSWindowCollectionBehaviorIgnoresCycle = 1 << 6;       // not in Cmd+Tab / window cycling
+    private const long NSWindowCollectionBehaviorFullScreenAuxiliary = 1 << 8; // may sit on a full-screen app's Space
 
     /// <summary>
-    /// Make an overlay float above other windows without taking keyboard focus from the
-    /// app being dictated into when clicked (macOS twin of WS_EX_NOACTIVATE).
+    /// Collection behavior for the dictation overlays. CanJoinAllSpaces alone keeps a
+    /// window off full-screen Spaces; FullScreenAuxiliary is what lets it show over a
+    /// full-screen app. Stationary keeps it still while Spaces swipe past.
     /// </summary>
-    public static void MakeNonActivatingPanel(Window window)
+    internal const long OverlayCollectionBehavior =
+        NSWindowCollectionBehaviorCanJoinAllSpaces
+        | NSWindowCollectionBehaviorStationary
+        | NSWindowCollectionBehaviorIgnoresCycle
+        | NSWindowCollectionBehaviorFullScreenAuxiliary;
+
+    private const long NSWindowStyleMaskNonactivatingPanel = 1 << 7; // clicks don't activate the app
+
+    /// <summary>
+    /// NSStatusWindowLevel. Above ordinary and floating windows of the full-screen app,
+    /// below our own tooltips (pop-up menu level).
+    /// </summary>
+    internal const long OverlayWindowLevel = 25;
+
+    /// <summary>
+    /// Make a dictation overlay float on whatever Space is active, full-screen Spaces
+    /// included (macOS twin of HWND_TOPMOST). Safe to call repeatedly; the overlays call
+    /// it each time they come back on screen in case Avalonia reset the level or
+    /// collection behavior. The non-activating style bit is requested too, but AppKit
+    /// only honors it on an NSPanel and Avalonia's window is an NSWindow, so focus is
+    /// actually kept by ShowActivated=false and by never calling makeKey/activate.
+    /// </summary>
+    public static void ConfigureOverlayWindow(Window window)
     {
         try
         {
@@ -168,14 +190,36 @@ internal static partial class MacOSHelper
             if (nsWindow == IntPtr.Zero) return;
 
             var styleMask = (long)objc_msgSend(nsWindow, sel_registerName("styleMask"));
-            objc_msgSend_long(nsWindow, sel_registerName("setStyleMask:"), styleMask | NSWindowStyleMaskNonactivatingPanel);
-            objc_msgSend_long(nsWindow, sel_registerName("setLevel:"), NSFloatingWindowLevel);
-            objc_msgSend_long(nsWindow, sel_registerName("setCollectionBehavior:"),
-                NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorTransient | NSWindowCollectionBehaviorIgnoresCycle);
+            if ((styleMask & NSWindowStyleMaskNonactivatingPanel) == 0)
+                objc_msgSend_long(nsWindow, sel_registerName("setStyleMask:"), styleMask | NSWindowStyleMaskNonactivatingPanel);
+            if ((long)objc_msgSend(nsWindow, sel_registerName("level")) != OverlayWindowLevel)
+                objc_msgSend_long(nsWindow, sel_registerName("setLevel:"), OverlayWindowLevel);
+            if ((long)objc_msgSend(nsWindow, sel_registerName("collectionBehavior")) != OverlayCollectionBehavior)
+                objc_msgSend_long(nsWindow, sel_registerName("setCollectionBehavior:"), OverlayCollectionBehavior);
+            // An accessory app is never "active", so never hide our windows on deactivate.
+            objc_msgSend_long(nsWindow, sel_registerName("setHidesOnDeactivate:"), 0);
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Failed to make window non-activating: {ex.Message}");
+            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Failed to configure overlay window: {ex.Message}");
+        }
+    }
+
+    /// <summary>Level and collection behavior of a window, for the log.</summary>
+    public static string DescribeOverlayWindow(Window window)
+    {
+        try
+        {
+            var nsWindow = window.TryGetPlatformHandle()?.Handle ?? IntPtr.Zero;
+            if (nsWindow == IntPtr.Zero) return "no NSWindow";
+            var level = (long)objc_msgSend(nsWindow, sel_registerName("level"));
+            var behavior = (long)objc_msgSend(nsWindow, sel_registerName("collectionBehavior"));
+            var style = (long)objc_msgSend(nsWindow, sel_registerName("styleMask"));
+            return $"level={level} collectionBehavior=0x{behavior:X} nonactivating={(style & NSWindowStyleMaskNonactivatingPanel) != 0}";
+        }
+        catch (Exception ex)
+        {
+            return $"unreadable ({ex.Message})";
         }
     }
 
