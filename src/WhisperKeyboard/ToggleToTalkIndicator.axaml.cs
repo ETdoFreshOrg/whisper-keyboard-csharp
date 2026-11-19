@@ -164,6 +164,11 @@ public partial class ToggleToTalkIndicator : Window
         Position = _savedPosition;
         _isOffScreen = false;
 
+        // macOS: re-assert level and Spaces behavior so the bar shows on the active
+        // Space, full-screen apps included.
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+            MacOSHelper.ConfigureOverlayWindow(this);
+
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
             var hwnd = TryGetPlatformHandle()?.Handle ?? IntPtr.Zero;
@@ -227,7 +232,7 @@ public partial class ToggleToTalkIndicator : Window
     private void MakeNonActivating()
     {
         if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
-            MacOSHelper.MakeNonActivatingPanel(this);
+            MacOSHelper.ConfigureOverlayWindow(this);
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return;
         try
         {

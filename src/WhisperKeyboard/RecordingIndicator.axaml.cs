@@ -60,6 +60,11 @@ public partial class RecordingIndicator : Window
     {
         InitializeComponent();
 
+        // macOS: showing the bar must never activate the app; activating an app can
+        // switch Spaces away from the full-screen app being dictated into.
+        if (OperatingSystem.IsMacOS())
+            ShowActivated = false;
+
         _volumeHistory = new double[MaxVolumeHistory];
         Waveform.VerticalInset = 6;
         Waveform.ShowCenterLine = true;
@@ -209,6 +214,11 @@ public partial class RecordingIndicator : Window
     /// </summary>
     private void ShowWithoutActivation()
     {
+        // macOS: re-assert level and Spaces behavior every time the bar comes back, so it
+        // shows on the active Space (full-screen apps included), not the desktop.
+        if (_hasBeenShown && RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+            MacOSHelper.ConfigureOverlayWindow(this);
+
         // First time showing - must use Show() to create the window
         // The Opened event will set WS_EX_NOACTIVATE style
         if (!_hasBeenShown)
@@ -279,49 +289,10 @@ public partial class RecordingIndicator : Window
 
     private void MakeWindowNonActivatingMacOS()
     {
-        try
-        {
-            var nsWindow = TryGetPlatformHandle()?.Handle ?? IntPtr.Zero;
-            if (nsWindow == IntPtr.Zero)
-            {
-                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] RecordingIndicator: Could not get NSWindow handle");
-                return;
-            }
-
-            // Get the NSWindow's styleMask and add NSWindowStyleMaskNonactivatingPanel
-            // We use Objective-C runtime to call: [nsWindow setStyleMask:([nsWindow styleMask] | NSWindowStyleMaskNonactivatingPanel)]
-
-            // Get current style mask
-            var currentStyleMask = objc_msgSend_IntPtr(nsWindow, sel_registerName("styleMask"));
-
-            // Add NSWindowStyleMaskNonactivatingPanel (1 << 7 = 128)
-            var newStyleMask = (IntPtr)((long)currentStyleMask | NSWindowStyleMaskNonactivatingPanel);
-
-            // Set the new style mask
-            objc_msgSend_void_IntPtr(nsWindow, sel_registerName("setStyleMask:"), newStyleMask);
-
-            // Also set the window level to floating panel level so it stays on top
-            // NSFloatingWindowLevel = 5
-            objc_msgSend_void_IntPtr(nsWindow, sel_registerName("setLevel:"), (IntPtr)5);
-
-            // NSWindowCollectionBehaviorCanJoinAllSpaces (1 << 0) = appear on all virtual desktops
-            // NSWindowCollectionBehaviorTransient (1 << 3) = not in Spaces/Mission Control
-            // NSWindowCollectionBehaviorIgnoresCycle (1 << 6) = not in Cmd+Tab / window cycling
-            var collectionBehavior = (IntPtr)(NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorTransient | NSWindowCollectionBehaviorIgnoresCycle);
-            objc_msgSend_void_IntPtr(nsWindow, sel_registerName("setCollectionBehavior:"), collectionBehavior);
-
-            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] RecordingIndicator: Window set to non-activating (macOS)");
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] RecordingIndicator: Error setting non-activating on macOS: {ex.Message}");
-        }
+        // Non-activating, status-level, on every Space including full-screen apps' Spaces.
+        MacOSHelper.ConfigureOverlayWindow(this);
+        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] RecordingIndicator: overlay configured (macOS): {MacOSHelper.DescribeOverlayWindow(this)}");
     }
-
-    private const long NSWindowStyleMaskNonactivatingPanel = 1 << 7;  // 128
-    private const long NSWindowCollectionBehaviorCanJoinAllSpaces = 1 << 0; // 1 - appear on all virtual desktops
-    private const long NSWindowCollectionBehaviorTransient = 1 << 3;  // 8 - not managed by Mission Control
-    private const long NSWindowCollectionBehaviorIgnoresCycle = 1 << 6; // 64 - not in Cmd+Tab cycling
 
     [DllImport("/usr/lib/libobjc.dylib", EntryPoint = "sel_registerName")]
     private static extern IntPtr sel_registerName(string name);
@@ -760,6 +731,8 @@ public partial class RecordingIndicator : Window
         {
             // Bring back from off-screen
             _isOffScreen = false;
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+                MacOSHelper.ConfigureOverlayWindow(this);
             if (Screens.Primary is { } s)
             {
                 var wa = s.WorkingArea;
